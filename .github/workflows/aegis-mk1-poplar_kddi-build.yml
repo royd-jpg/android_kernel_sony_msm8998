@@ -7,6 +7,8 @@ name: Project Aegis Mk1 — Build Kernel (Xperia XZ1 SOV36 poplar_kddi + KernelS
 #       "-Aegis_Mk1" | "-am1x[git7]" (default; '-am1x' + first 7 hex of the checked-out kernel HEAD) | Other.
 #       KBUILD_BUILD_USER/HOST are set (defaults am1x / AegisDevLabs). The resolved .config, kernel.release
 #       and the linked vmlinux are checked against the brand; any leftover "JustinLin099" fails the build.
+#       build_version (#N) and build_date (Now | Other + custom_build_date) set KBUILD_BUILD_VERSION /
+#       KBUILD_BUILD_TIMESTAMP; both are verified in the linked vmlinux version string.
 #   (2) Toolchain choice: aosp (clang_rev, default r547379 = Clang 20; auto-falls back to r536225) | aosp19 |
 #       neutron19 | weebx | zyc_stable. Only 'aosp' has an automatic fallback; explicit picks fail hard.
 #   (3) Final product is an AnyKernel3 ZIP (Image.gz-dtb with the poplar_kddi DTB appended, KernelSU-Next
@@ -68,6 +70,23 @@ on:
         required: false
         default: "AegisDevLabs"
         type: string
+      build_version:
+        description: "KBUILD_BUILD_VERSION (the #N token in the version string, digits)"
+        required: false
+        default: "1"
+        type: string
+      build_date:
+        description: "KBUILD_BUILD_TIMESTAMP. 'Now' = current UTC time at build. 'Other' uses custom_build_date (empty => fixed default Thu Jan 1 00:00:00 UTC 2026)."
+        required: true
+        type: choice
+        options:
+          - "Now"
+          - "Other"
+        default: "Now"
+      custom_build_date:
+        description: "Custom build timestamp, date(1) style e.g. 'Wed Oct 28 12:00:00 UTC 2026' — only if build_date=Other"
+        required: false
+        type: string
       ak3_ref:
         description: "AnyKernel3 upstream branch or tag (osm0sis/AnyKernel3). Resolved commit is logged. Default master is mutable."
         required: false
@@ -102,6 +121,10 @@ jobs:
       IN_BUILD_USER: ${{ inputs.build_user }}
       IN_BUILD_HOST: ${{ inputs.build_host }}
       IN_AK3_REF: ${{ inputs.ak3_ref }}
+      IN_BUILD_VERSION: ${{ inputs.build_version }}
+      IN_BUILD_DATE: ${{ inputs.build_date }}
+      IN_CUSTOM_BUILD_DATE: ${{ inputs.custom_build_date }}
+      BUILD_DATE_DEFAULT: "Thu Jan 1 00:00:00 UTC 2026"
       # AOSP prebuilts/clang: r547379 = Clang 20.0.0, r536225 = Clang 19 (known-good fallback)
       CLANG20_REV: r547379
       CLANG19_REV: r536225
@@ -123,6 +146,7 @@ jobs:
           fi
           [[ "$IN_BUILD_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad build_user '$IN_BUILD_USER'"; exit 1; }
           [[ "$IN_BUILD_HOST" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad build_host '$IN_BUILD_HOST'"; exit 1; }
+          [[ "$IN_BUILD_VERSION" =~ ^[0-9]+$ ]] || { echo "::error::build_version must be digits"; exit 1; }
           [[ "$IN_AK3_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::bad ak3_ref '$IN_AK3_REF'"; exit 1; }
           if [ "$IN_TOOLCHAIN" != "aosp" ] && [ -n "$CLANG_REV_INPUT" ]; then
             echo "::notice::clang_rev ignored (toolchain=$IN_TOOLCHAIN)"
@@ -150,13 +174,25 @@ jobs:
           esac
           [[ "$FINAL_BRAND" =~ ^-[A-Za-z0-9._+@:-]+$ ]] || { echo "::error::brand '$FINAL_BRAND' must start with '-' and use [A-Za-z0-9._+@:-]"; exit 1; }
           case "$FINAL_BRAND" in *JustinLin099*) echo "::error::brand must not contain JustinLin099"; exit 1 ;; esac
+          if [ "$IN_BUILD_DATE" = "Other" ]; then
+            FINAL_DATE="$IN_CUSTOM_BUILD_DATE"
+            if [ -z "$FINAL_DATE" ]; then
+              FINAL_DATE="$BUILD_DATE_DEFAULT"
+              echo "::warning::build_date=Other with empty custom_build_date — using fixed default '$FINAL_DATE'"
+            fi
+          else
+            FINAL_DATE="$(date -u '+%a %b %-d %H:%M:%S UTC %Y')"
+          fi
+          [[ "$FINAL_DATE" =~ ^[A-Za-z0-9\ :+._-]+$ ]] || { echo "::error::bad build date '$FINAL_DATE'"; exit 1; }
           {
+            echo "KBUILD_BUILD_VERSION=$IN_BUILD_VERSION"
+            echo "KBUILD_BUILD_TIMESTAMP=$FINAL_DATE"
             echo "BRAND=$FINAL_BRAND"
             echo "KERNEL_SHA=$SHA"
             echo "KBUILD_BUILD_USER=$IN_BUILD_USER"
             echo "KBUILD_BUILD_HOST=$IN_BUILD_HOST"
           } >> "$GITHUB_ENV"
-          echo "brand=$FINAL_BRAND  kernel HEAD=$SHA  user=$IN_BUILD_USER  host=$IN_BUILD_HOST"
+          echo "brand=$FINAL_BRAND  kernel HEAD=$SHA  user=$IN_BUILD_USER  host=$IN_BUILD_HOST  ver=#$IN_BUILD_VERSION  ts=$FINAL_DATE"
 
       - name: Init KernelSU-Next submodule (pinned gitlink)
         shell: bash
@@ -492,6 +528,8 @@ jobs:
           [ -s "$ART/linux_version.txt" ] || { echo "::error::no 'Linux version' string found in vmlinux"; exit 1; }
           cat "$ART/linux_version.txt"
           grep -qF -- "$KREL" "$ART/linux_version.txt" || { echo "::error::vmlinux version string lacks '$KREL'"; exit 1; }
+          grep -qF -- "#$KBUILD_BUILD_VERSION " "$ART/linux_version.txt" || { echo "::error::version string lacks '#$KBUILD_BUILD_VERSION'"; exit 1; }
+          grep -qF -- "$KBUILD_BUILD_TIMESTAMP" "$ART/linux_version.txt" || { echo "::error::version string lacks timestamp '$KBUILD_BUILD_TIMESTAMP'"; exit 1; }
           if grep -q 'JustinLin099' "$ART/linux_version.txt"; then echo "::error::JustinLin099 in vmlinux version string"; exit 1; fi
 
           if [ "$ENABLE_KSUN" = "true" ]; then
@@ -595,6 +633,7 @@ jobs:
           {
             echo "### Project Aegis Mk1 — poplar_kddi kernel build"
             echo "- branch: \`$BRANCH\`  brand: \`${BRAND:-n/a}\`  KSUN: \`$ENABLE_KSUN\`"
+            echo "- build: \`#${KBUILD_BUILD_VERSION:-n/a}\`  \`${KBUILD_BUILD_TIMESTAMP:-n/a}\`"
             echo "- toolchain: \`${BUILD_TC:-${TC_USED:-n/a}}\` (requested \`${TC_PRIMARY:-$IN_TOOLCHAIN}\`)"
             echo "- defconfig: \`$DEFCONFIG\`  dtb: \`$DTB_NAME\`"
             echo "- final product: \`${ZIP_NAME:-not produced}\` (AnyKernel3; structure-verified, not flash-tested here)"
