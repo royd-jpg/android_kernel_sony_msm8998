@@ -191,6 +191,16 @@ jobs:
 
           make "${MAKE_ARGS[@]}" "$DEFCONFIG"
 
+          # poplar_kddi_defconfig omits these two int symbols (no Kconfig default). olddefconfig then
+          # writes "CONFIG_LITTLE_CPU_MASK=" (empty, invalid) and the build's silentoldconfig aborts on a
+          # prompt. Sibling SD835 defconfigs (lilac, maple_dsds, poplar_dsds) set 15 (0x0F) / 240 (0xF0).
+          for kv in "LITTLE_CPU_MASK 15" "BIG_CPU_MASK 240"; do
+            set -- $kv
+            if ! grep -q "^CONFIG_$1=[0-9]" out/.config; then
+              ./scripts/config --file out/.config --set-val "$1" "$2"
+            fi
+          done
+
           ./scripts/config --file out/.config -e KSU
           if [ "$KSU_MANUAL_HOOK" = "true" ]; then
             ./scripts/config --file out/.config -e KSU_MANUAL_HOOK
@@ -205,6 +215,13 @@ jobs:
               exit 1
             fi
           }
+          # Any "CONFIG_X=" (empty) makes the later silentoldconfig prompt and abort the build.
+          if EMPTY="$(grep -nE '^CONFIG_[A-Za-z0-9_]+=$' out/.config)"; [ -n "$EMPTY" ]; then
+            echo "::error title=Empty config values::$(echo "$EMPTY" | tr '\n' ' ') - set them in the defconfig"
+            exit 1
+          fi
+          must CONFIG_LITTLE_CPU_MASK=15
+          must CONFIG_BIG_CPU_MASK=240
           must CONFIG_KSU=y
           must CONFIG_MACH_SONY_POPLAR_KDDI=y
           must CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
