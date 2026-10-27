@@ -1,0 +1,385 @@
+name: Build Kernel (Xperia XZ1 SOV36 poplar_kddi + KernelSU-Next)
+
+# Target : Sony Xperia XZ1 SOV36 (poplar_kddi), msm8998, Linux 4.4.302, arm64, non-GKI
+# Config : arch/arm64/configs/lineage-msm8998-yoshino-poplar_kddi_defconfig (only this one)
+# DTB    : arch/arm/boot/dts/qcom/msm8998-v2.1-yoshino-poplar_kddi.dtb (the only DTB built)
+#          (the stock `dtbs` target would also build msmhamster-rumi.dtb via ARCH_MSMHAMSTER; it is skipped)
+# Image  : CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y -> Image.gz-dtb = Image.gz + that one DTB
+#          (composed with cat, byte-identical to the kernel's own Image.gz-dtb rule when
+#          CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES names only the poplar_kddi DTB)
+# Root   : KernelSU-Next (submodule, legacy branch) in MANUAL hook mode. No SUSFS. No ReSukiSU.
+# boot.img is intentionally NOT built (needs SOV36 ramdisk + header params + AVB inputs).
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Kernel branch to build"
+        required: true
+        default: "lineage-22.2"
+        type: string
+      enable_ksun:
+        description: "Build with KernelSU-Next (CONFIG_KSU=y, manual hooks). false = plain kernel"
+        required: true
+        default: true
+        type: boolean
+      clang_rev:
+        description: "Optional AOSP clang revision (e.g. r547379). Empty = Clang 20 default"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-kernel-${{ inputs.branch }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      DEFCONFIG: lineage-msm8998-yoshino-poplar_kddi_defconfig
+      DTB_NAME: msm8998-v2.1-yoshino-poplar_kddi.dtb
+      KDIR: ${{ github.workspace }}/kernel
+      ART: ${{ github.workspace }}/artifacts
+      TC: ${{ github.workspace }}/toolchains
+      BRANCH: ${{ inputs.branch }}
+      ENABLE_KSUN: ${{ inputs.enable_ksun }}
+      CLANG_REV_INPUT: ${{ inputs.clang_rev }}
+      # AOSP prebuilts/clang: r547379 = Clang 20.0.0, r536225 = Clang 19 (known-good fallback)
+      CLANG20_REV: r547379
+      CLANG19_REV: r536225
+      CLANG_REPO: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+      CLANG_REF: refs/heads/main
+    steps:
+      - name: Checkout kernel (${{ inputs.branch }})
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 1
+          submodules: false
+          path: kernel
+
+      - name: Init KernelSU-Next submodule (pinned gitlink)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          mkdir -p "$ART" "$TC"
+          grep -q 'KernelSU-Next' .gitmodules || { echo "::error::KernelSU-Next missing from .gitmodules"; exit 1; }
+          # .gitmodules may still carry an SSH URL on old branches; force HTTPS on the runner.
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync --recursive
+          # Full history + tags on purpose: KSUN Kbuild derives KSU_VERSION from `git rev-list --count`
+          # and KSU_VERSION_TAG from `git describe`; a shallow clone yields a wrong version (30151) and an
+          # empty tag, and Kbuild would try `git fetch --unshallow` in the middle of the build.
+          git submodule update --init KernelSU-Next
+          git -C KernelSU-Next fetch --tags --quiet || true
+          echo "KSUN commits: $(git -C KernelSU-Next rev-list --count HEAD)  tag: $(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo none)"
+          status="$(git submodule status KernelSU-Next)"
+          echo "submodule: $status"
+          case "$status" in
+            [-+U]*) echo "::error::KernelSU-Next not at the pinned commit ($status)"; exit 1 ;;
+          esac
+          [ -L drivers/kernelsu ] || { echo "::error::drivers/kernelsu symlink missing"; exit 1; }
+          [ -f drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu/Kconfig unreachable through symlink"; exit 1; }
+
+      - name: Preflight (target, KSUN hooks, no ReSukiSU)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          D="arch/arm64/configs/$DEFCONFIG"
+          [ -f "$D" ] || { echo "::error::$D not found"; exit 1; }
+          grep -q '^CONFIG_MACH_SONY_POPLAR_KDDI=y' "$D" || { echo "::error::$DEFCONFIG lacks CONFIG_MACH_SONY_POPLAR_KDDI=y"; exit 1; }
+          if grep -qE '^CONFIG_MACH_SONY_(MAPLE|MAPLE_DSDS|POPLAR|POPLAR_DSDS|LILAC|LILAC_DCM)=y' "$D"; then
+            echo "::error::$DEFCONFIG enables another Sony machine"; exit 1
+          fi
+          grep -qx 'CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="qcom/'"${DTB_NAME%.dtb}"'"' "$D" \
+            || { echo "::error::defconfig must append only qcom/${DTB_NAME%.dtb}"; exit 1; }
+          [ -f "arch/arm/boot/dts/qcom/${DTB_NAME%.dtb}.dts" ] || { echo "::error::DTS for $DTB_NAME not found"; exit 1; }
+          # shellcheck disable=SC2016
+          grep -q 'dtb-$(CONFIG_MACH_SONY_POPLAR_KDDI) += '"$DTB_NAME" arch/arm/boot/dts/qcom/Makefile \
+            || { echo "::error::DTB rule for $DTB_NAME missing in qcom/Makefile"; exit 1; }
+
+          # No ReSukiSU / SukiSU / SUSFS anywhere (kernel tree, submodule, workflows, docs).
+          if hits="$(grep -rIil -e resuki -e sukisu -e susfs --exclude-dir=.git --exclude=build-kernel.yml . || true)"; [ -n "$hits" ]; then
+            echo "::error::ReSukiSU/SukiSU/SUSFS references found:"; echo "$hits"; exit 1
+          fi
+
+          # GKI/kprobe-only symbols must not be set for this 4.4 kernel.
+          if grep -qE '^CONFIG_KSU_(KPROBES_HOOK|TRACEPOINT_HOOK|SUSFS[A-Z_]*)=y' "$D"; then
+            echo "::error::GKI-only/SUSFS KSU option enabled in $DEFCONFIG"; exit 1
+          fi
+
+          # Manual hooks must be in the tree (KSUN Kbuild refuses to build without kernel/reboot.c hook).
+          for pair in "fs/exec.c:ksu_handle_execveat" "fs/open.c:ksu_handle_faccessat" "fs/stat.c:ksu_handle_stat" \
+                      "fs/read_write.c:ksu_handle_sys_read" "kernel/reboot.c:ksu_handle_sys_reboot" \
+                      "security/selinux/hooks.c:is_ksu_transition" "security/selinux/ss/services.c:is_ksu_transition"; do
+            grep -q "${pair#*:}" "${pair%%:*}" || { echo "::error::manual hook ${pair#*:} missing in ${pair%%:*}"; exit 1; }
+          done
+
+          # KSUN Kbuild sed-patches kernel sources at parse time when these are absent. That races with
+          # parallel compilation, so require them to be committed in the tree.
+          chk() { grep -qF -- "$2" "$1" || { echo "::error::backport missing in $1: '$2' (Kbuild would patch it mid-build)"; exit 1; }; }
+          chk fs/namespace.c 'static int can_umount'
+          chk fs/namespace.c 'int path_umount'
+          chk fs/internal.h  'int path_umount'
+          chk include/linux/seccomp.h 'atomic_t filter_count;'
+          chk security/selinux/hooks.c 'selinux_inode(inode)'
+          chk security/selinux/hooks.c 'selinux_cred'
+          chk security/selinux/selinuxfs.c 'selinux_inode(inode)'
+          chk security/selinux/xfrm.c 'selinux_cred'
+          chk security/selinux/include/objsec.h 'selinux_inode'
+          chk security/selinux/include/objsec.h 'selinux_cred'
+          echo "preflight OK"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # arm-linux-gnueabi: CONFIG_COMPAT_VDSO=y needs the 32-bit GNU binutils (-no-integrated-as).
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev zlib1g-dev make gcc g++ perl python3 cpio kmod \
+            xz-utils lz4 git curl ca-certificates \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Write clang helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/clang-lib.sh" <<'LIB'
+          # acquire_clang <rev>: verify revision exists, download, log, extract, smoke-test.
+          # On success: prints nothing special, sets CLANG_BIN_DIR. Returns non-zero on any failure.
+          acquire_clang() {
+            local rev="$1" base url meta_url code archive sha ver dir
+            base="$CLANG_REPO/+archive/$CLANG_REF"
+            meta_url="$CLANG_REPO/+/$CLANG_REF/clang-$rev/AndroidVersion.txt?format=TEXT"
+            url="$base/clang-$rev.tar.gz"
+            archive="$TC/clang-$rev.tar.gz"
+            dir="$TC/clang-$rev"
+
+            echo "::group::clang $rev"
+            echo "existence check URL : $meta_url"
+            code="$(curl -sS -L -o "$TC/AndroidVersion-$rev.b64" -w '%{http_code}' --retry 3 --retry-delay 5 "$meta_url" || true)"; code="${code:-000}"
+            echo "existence check HTTP: $code"
+            if [ "$code" != "200" ]; then
+              echo "::warning::clang-$rev not found in $CLANG_REPO@$CLANG_REF (HTTP $code)"
+              echo "::endgroup::"; return 1
+            fi
+            echo "AndroidVersion.txt  : $(base64 -d "$TC/AndroidVersion-$rev.b64" 2>/dev/null | tr '\n' ' ')"
+
+            echo "download URL        : $url"
+            code="$(curl -sS -L -o "$archive" -w '%{http_code}' --retry 3 --retry-delay 5 --connect-timeout 30 "$url" || true)"; code="${code:-000}"
+            echo "download HTTP       : $code"
+            if [ "$code" != "200" ] || [ ! -s "$archive" ]; then
+              echo "::warning::download of clang-$rev failed (HTTP $code)"
+              echo "::endgroup::"; return 1
+            fi
+            sha="$(sha256sum "$archive" | cut -d' ' -f1)"
+            echo "archive name        : $(basename "$archive")"
+            echo "archive size        : $(stat -c%s "$archive")"
+            echo "archive SHA256      : $sha"
+
+            rm -rf "$dir"; mkdir -p "$dir"
+            if ! tar -xzf "$archive" -C "$dir"; then
+              echo "::warning::extract of clang-$rev failed"; echo "::endgroup::"; return 1
+            fi
+            rm -f "$archive"
+            if ! ver="$("$dir/bin/clang" --version 2>&1 | head -1)"; then
+              echo "::warning::clang-$rev does not execute"; echo "::endgroup::"; return 1
+            fi
+            echo "extracted version   : $ver"
+            {
+              echo "rev=$rev"; echo "url=$url"; echo "http=$code"
+              echo "archive=$(basename "$archive")"; echo "sha256=$sha"; echo "version=$ver"
+            } > "$ART/clang-info-$rev.txt"
+            echo "::endgroup::"
+            CLANG_BIN_DIR="$dir/bin"
+            return 0
+          }
+          LIB
+
+      - name: Acquire Clang (Clang 20 primary, Clang 19 fallback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/clang-lib.sh"
+          primary="${CLANG_REV_INPUT:-$CLANG20_REV}"
+          case "$primary" in r[0-9]*) ;; *) echo "::error::clang_rev must look like r547379 (got '$primary')"; exit 1 ;; esac
+          CLANG_BIN_DIR=""
+          used=""
+          if acquire_clang "$primary"; then
+            used="$primary"
+          else
+            echo "::warning::primary clang $primary unavailable; falling back to $CLANG19_REV"
+            if [ "$primary" != "$CLANG19_REV" ] && acquire_clang "$CLANG19_REV"; then
+              used="$CLANG19_REV"
+            fi
+          fi
+          [ -n "$used" ] || { echo "::error::no usable AOSP clang (tried $primary and $CLANG19_REV)"; exit 1; }
+          {
+            echo "CLANG_USED=$used"
+            echo "CLANG_PRIMARY=$primary"
+          } >> "$GITHUB_ENV"
+          echo "$CLANG_BIN_DIR" >> "$GITHUB_PATH"
+          echo "using clang $used: $("$CLANG_BIN_DIR/clang" --version | head -1)"
+
+      - name: Configure (defconfig, non-interactive) and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          cat > "$RUNNER_TEMP/make-args.sh" <<'EOF'
+          MAKE_ARGS=(O=out ARCH=arm64 SUBARCH=arm64
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CC=clang LLVM=1 CLANG_TRIPLE=aarch64-linux-gnu-
+            HOSTCC="gcc -fcommon" HOSTCXX=g++)
+          EOF
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/make-args.sh"
+          rm -rf out
+
+          make "${MAKE_ARGS[@]}" "$DEFCONFIG" </dev/null
+          if [ "$ENABLE_KSUN" != "true" ]; then
+            ./scripts/config --file out/.config -d KSU
+          fi
+          make "${MAKE_ARGS[@]}" olddefconfig </dev/null
+
+          # Resolution must be stable and prompt-free: a second pass changes nothing,
+          # and silentoldconfig (run by the real build) must not need input.
+          cp out/.config "$RUNNER_TEMP/config.pass1"
+          make "${MAKE_ARGS[@]}" olddefconfig </dev/null
+          cmp -s out/.config "$RUNNER_TEMP/config.pass1" || { echo "::error::config not stable across olddefconfig passes"; diff "$RUNNER_TEMP/config.pass1" out/.config | head -40; exit 1; }
+          make "${MAKE_ARGS[@]}" silentoldconfig </dev/null
+
+          if EMPTY="$(grep -nE '^CONFIG_[A-Za-z0-9_]+=$' out/.config)"; [ -n "$EMPTY" ]; then
+            echo "::error::empty config values (would prompt): $(echo "$EMPTY" | tr '\n' ' ')"; exit 1
+          fi
+          must() { grep -qx "$1" out/.config || { echo "::error::missing in resolved .config: $1"; exit 1; }; }
+          mustnot() { if grep -qxE "$1" out/.config; then echo "::error::unexpected in resolved .config: $1"; exit 1; fi; }
+          must CONFIG_MACH_SONY_POPLAR_KDDI=y
+          must CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
+          must 'CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="qcom/msm8998-v2.1-yoshino-poplar_kddi"'
+          must CONFIG_LITTLE_CPU_MASK=15
+          must CONFIG_BIG_CPU_MASK=240
+          mustnot 'CONFIG_MACH_SONY_(MAPLE|MAPLE_DSDS|POPLAR|POPLAR_DSDS|LILAC|LILAC_DCM)=y'
+          mustnot 'CONFIG_KSU_(KPROBES_HOOK|TRACEPOINT_HOOK|SUSFS[A-Z_]*)=y'
+          if [ "$ENABLE_KSUN" = "true" ]; then
+            must CONFIG_KSU=y
+            must CONFIG_KSU_MANUAL_HOOK=y
+          else
+            mustnot 'CONFIG_KSU=[ym]'
+          fi
+          grep -E '^(# )?CONFIG_(KSU|MACH_SONY_|BUILD_ARM64_APPENDED|LOCALVERSION=)' out/.config
+
+      - name: Build poplar_kddi DTB and Image.gz-dtb (poplar_kddi DTB only)
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$KDIR"
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/make-args.sh"
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/clang-lib.sh"
+          : > "$ART/build.log"
+
+          build() {
+            local jobs; jobs="$(nproc)"
+            {
+              echo "=== clang: $(clang --version | head -1)"
+              # flask.h is generated under security/selinux and included by drivers/kernelsu;
+              # generate it first so parallel descent cannot race.
+              make -j"$jobs" "${MAKE_ARGS[@]}" security/selinux/ &&
+              make -j"$jobs" "${MAKE_ARGS[@]}" "qcom/$DTB_NAME" &&
+              make -j"$jobs" "${MAKE_ARGS[@]}" Image.gz &&
+              cat out/arch/arm64/boot/Image.gz "out/arch/arm64/boot/dts/qcom/$DTB_NAME" > out/arch/arm64/boot/Image.gz-dtb
+            } 2>&1 | tee -a "$ART/build.log"
+            return "${PIPESTATUS[0]}"
+          }
+
+          if build; then
+            echo "BUILD_CLANG=$CLANG_USED" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "::warning::build failed with clang $CLANG_USED"
+          if [ "$CLANG_USED" = "$CLANG19_REV" ]; then
+            echo "::error::build failed with the fallback clang as well"; exit 1
+          fi
+          echo "::warning::retrying clean build with fallback clang $CLANG19_REV"
+          CLANG_BIN_DIR=""
+          acquire_clang "$CLANG19_REV" || { echo "::error::fallback clang unavailable"; exit 1; }
+          export PATH="$CLANG_BIN_DIR:$PATH"
+          cp out/.config "$RUNNER_TEMP/config.keep"
+          rm -rf out && mkdir -p out && cp "$RUNNER_TEMP/config.keep" out/.config
+          make "${MAKE_ARGS[@]}" olddefconfig </dev/null
+          echo "=== RETRY WITH FALLBACK CLANG $CLANG19_REV ===" >> "$ART/build.log"
+          build || { echo "::error::build failed with fallback clang $CLANG19_REV"; exit 1; }
+          echo "CLANG_USED=$CLANG19_REV" >> "$GITHUB_ENV"
+          echo "BUILD_CLANG=$CLANG19_REV" >> "$GITHUB_ENV"
+
+      - name: Verify outputs and collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          B=out/arch/arm64/boot
+
+          mapfile -t ALL_DTB < <(find -L "$B/dts" -name '*.dtb' | sort)
+          mapfile -t KDDI_DTB < <(find -L "$B/dts" -name '*poplar_kddi*.dtb' | sort)
+          echo "all dtbs     : ${ALL_DTB[*]:-none}"
+          echo "poplar_kddi  : ${KDDI_DTB[*]:-none}"
+          [ "${#KDDI_DTB[@]}" -eq 1 ] || { echo "::error::expected exactly 1 poplar_kddi DTB, found ${#KDDI_DTB[@]}"; exit 1; }
+          [ "$(basename "${KDDI_DTB[0]}")" = "$DTB_NAME" ] || { echo "::error::unexpected DTB ${KDDI_DTB[0]}"; exit 1; }
+          [ "${#ALL_DTB[@]}" -eq 1 ] || { echo "::error::Image.gz-dtb would append ${#ALL_DTB[@]} DTBs, expected only poplar_kddi"; exit 1; }
+
+          if [ ! -s "$B/Image.gz" ] || [ ! -s "$B/Image.gz-dtb" ]; then
+            echo "::error::Image.gz / Image.gz-dtb missing"; exit 1
+          fi
+          gz="$(stat -c%s "$B/Image.gz")"; dtb="$(stat -c%s "${KDDI_DTB[0]}")"; tot="$(stat -c%s "$B/Image.gz-dtb")"
+          [ "$tot" -eq $((gz + dtb)) ] || { echo "::error::Image.gz-dtb size $tot != Image.gz $gz + dtb $dtb"; exit 1; }
+          head -c "$gz" "$B/Image.gz-dtb" | cmp - "$B/Image.gz" || { echo "::error::Image.gz-dtb does not start with Image.gz"; exit 1; }
+          tail -c "$dtb" "$B/Image.gz-dtb" | cmp - "${KDDI_DTB[0]}" || { echo "::error::Image.gz-dtb does not end with the poplar_kddi DTB"; exit 1; }
+
+          if [ "$ENABLE_KSUN" = "true" ]; then
+            grep -qE ' [Tt] ksu_' out/System.map || { echo "::error::no ksu_* symbols linked into vmlinux"; exit 1; }
+            grep -qE ' [Tt] ksu_handle_(execveat|sys_reboot|faccessat|stat)' out/System.map \
+              || { echo "::error::manual hook entry points not linked"; exit 1; }
+          fi
+
+          cp "$B/Image.gz" "$B/Image.gz-dtb" "$ART/"
+          cp "${KDDI_DTB[0]}" "$ART/"
+          cp out/.config "$ART/resolved.config"
+          strings -n 8 out/vmlinux 2>/dev/null | grep -m1 'Linux version' > "$ART/linux_version.txt" || true
+          git -C "$KDIR" submodule status KernelSU-Next > "$ART/ksun_submodule.txt" || true
+          (cd "$ART" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > "$RUNNER_TEMP/SHA256SUMS")
+          mv "$RUNNER_TEMP/SHA256SUMS" "$ART/SHA256SUMS"
+          cat "$ART/SHA256SUMS"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### poplar_kddi kernel build"
+            echo "- branch: \`$BRANCH\`  KSUN: \`$ENABLE_KSUN\`  clang: \`${BUILD_CLANG:-${CLANG_USED:-n/a}}\` (requested \`${CLANG_PRIMARY:-n/a}\`)"
+            echo "- defconfig: \`$DEFCONFIG\`  dtb: \`$DTB_NAME\`"
+            echo "- boot.img: not built (no SOV36 ramdisk / header params / AVB inputs supplied)"
+            if [ -f "$ART/SHA256SUMS" ]; then echo '```'; cat "$ART/SHA256SUMS"; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-poplar_kddi-run${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
