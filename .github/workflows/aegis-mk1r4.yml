@@ -930,6 +930,8 @@ jobs:
           do.cleanuponabort=0
           device.name1=poplar_kddi
           device.name2=SOV36
+          device.name3=poplar
+          device.name4=Sony KDDI SOV36
           supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
