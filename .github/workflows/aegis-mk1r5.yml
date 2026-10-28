@@ -1,0 +1,1294 @@
+name: Project Aegis Mk1r5 — Build Kernel (Xperia XZ1 SOV36 poplar_kddi + KernelSU-Next / SUSFS / NoMount v2.2.0 / Baseband-guard / Re:Kernel) → AnyKernel3 ZIP
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VERSION HISTORY
+# v.20261029-r5 — Mk1r5: NoMount updated v2.0.0 -> v2.2.0 (driver protocol v22). Everything else is unchanged from r4.
+#   Why the source changed: the faryx a9b98d40 NoMount is a 4.4 port of v2.0.0 and the axion-a16-features branch of
+#   royd-jpg/android_kernel_sony_msm8998_v2 has no v2.2.0 port (its tip is still NOMOUNT_VERSION "20", no commit after
+#   a9b98d40 touches fs/nomount). So NoMount is now taken from UPSTREAM maxsteeel/nomount, tag v2.2.0, pinned by commit
+#   SHA bf1847f9 (NOMOUNT_REPO / NOMOUNT_TAG / NOMOUNT_SHA), copied from kernel/src (Kconfig, Makefile, nomount.c,
+#   nomount.h) into fs/nomount/ as plain files. Upstream v2.2.0 supports kernels >= 4.11 and does NOT compile on 4.4, so the
+#   "Apply NoMount" step runs a small exact-match patch script (nomount_44_compat.py, embedded below) that adds only the 4.4
+#   shims: full_name_hash() salt (< 4.16), in_compat_syscall() (< 4.6), iterate_shared (4.7+), follow_link vs get_link (4.5),
+#   xattr_handler get/set without the inode argument (< 4.9). Same shim approach as the faryx port. Any anchor that no longer
+#   matches exactly once fails the build, so bumping NOMOUNT_SHA to a newer tag cannot silently produce a wrong driver.
+#   fs/Kconfig / fs/Makefile are wired by this workflow (same as upstream setup.sh, but real files, no symlink/.git lookup).
+#   faryx a9b98d40 is still the source for SUSFS, Baseband-guard and Re:Kernel (the NoMount parts of that commit are no
+#   longer used). Compile-verified in a sandbox (Ubuntu clang 18, 4.4 tree, defconfig + NOMOUNT=y: fs/nomount/nomount.o builds
+#   with no errors/warnings; its new undefined symbols all exist in 4.4). NOT linked into a full vmlinux and NOT run on a device.
+#   REQUIRED on the device: NoMount metamodule v2.2.0 (protocol v22). A v22 CLI cannot talk to a v21/v20 driver and vice versa,
+#   so the old v2.0.0 metamodule will not work with this kernel and v2.2.0 will not work with an r4 kernel.
+# v.20261028-r4 — Mk1r4: Baseband-guard and Re:Kernel added as two more INDEPENDENT toggles (enable_bbg, enable_rekernel;
+#   both default true) on top of the r3 flow below, which is otherwise unchanged (KernelSU-Next manual hooks kept, SUSFS via
+#   the KSUN legacy-susfs cherry-pick, NoMount). Both are taken from the same faryx commit a9b98d40 and applied after NoMount:
+#     Baseband-guard = Baseband-guard/ (vendored, incl. its tracing/ helper) + the security/baseband-guard and
+#                      security/selinux/include/bbg_tracing.h symlinks, the commit's objsec.h (bbg_cred) and
+#                      security/selinux/Makefile hunks, one line each in security/Makefile and security/Kconfig.
+#                      CONFIG_BBG=y; BBG_BLOCK_BOOT / BBG_BLOCK_RECOVERY stay off (commit default; BBG_BLOCK_BOOT=y would
+#                      make the AnyKernel3 flash from Android fail) and the build fails if either is on.
+#     Re:Kernel      = drivers/net/rekernel/* + include/net/rekernel.h, drivers/net Kconfig/Makefile lines.
+#                      CONFIG_REKERNEL=y, REKERNEL_DEBUG off.
+#   Neither needs the ReSukiSU hook rewrite. Release label (zip name, kernel.string, job name) is the env RELEASE.
+#   Faryx's Re:Kernel has no hook sites (nothing in binder/signal calls rekernel_report*): the netlink server is built and
+#   registered but reports nothing until such hooks are added. See Summary.
+# v.20261028-r3 — SUSFS and NoMount added as two INDEPENDENT toggles (enable_susfs, enable_nomount; both default true).
+#   Reference: faryx/android_kernel_sony_msm8998 commit a9b98d40 (axion-a16-features, poplar). That commit is a
+#   ReSukiSU-based integration, so only the parts that do not depend on ReSukiSU are taken:
+#     SUSFS   = fs/susfs.c + include/linux/susfs.h + include/linux/susfs_def.h (SUSFS v2.3.0 NON-GKI, 4.4.302 port),
+#               the SUS_MOUNT hunks of fs/namespace.c, the fs/Makefile susfs.o line, and the KernelSU-Next-side SUSFS
+#               commit 4cc162e0 (justinlin099/KernelSU-Next legacy-susfs) cherry-picked onto the pinned gitlink.
+#               susfs_run_sus_path_loop() is made non-static (KSUN calls it; faryx declared it static).
+#     NoMount = (r3/r4: fs/nomount/*, fs/Kconfig source line, fs/Makefile line from the faryx 4.4 port of NoMount v2.0.0;
+#               superseded in r5, see above)
+#   NOT taken: the ReSukiSU inline-hook rewrites of exec/open/stat/read_write/input/selinux, policy_rwlock export,
+#   reboot/sys/trace hunks, Baseband-guard, Re:Kernel. KernelSU-Next keeps the tree's existing manual hooks.
+#   Two unrelated reverts in that commit (vfs_submount, mntns_owner) are neutralized, not applied.
+#   Compile+link verified on this tree (sandbox, clang 14): SUSFS+NoMount, Image.gz-dtb produced. NOT run on a device.
+#   Several SUSFS features have no hook sites in the kernel (same in faryx's tree): see Summary / features.txt.
+# v.20261028-r2 — Fix neutron19 run #1 failure ("clang from neutron19 does not execute"): clang-19 needs
+#   GLIBC_2.38, ubuntu-22.04 has 2.35. neutron19 now runs on ubuntu-24.04; others unchanged. Toolchain
+#   exec failures now log the real error, required vs host glibc, and write toolchain-fail-<id>.txt.
+# v.20261028-r1 — Project Aegis Mk1. Derived from the poplar_kddi KSUN build workflow.
+#   (1) Branding: CONFIG_LOCALVERSION is forced at CI time (LOCALVERSION_AUTO off), brand dropdown
+#       "-Aegis_Mk1" | "-am1x[git7]" (default; '-am1x' + first 7 hex of the checked-out kernel HEAD) | Other.
+#       KBUILD_BUILD_USER/HOST are set (defaults am1x / AegisDevLabs). The resolved .config, kernel.release
+#       and the linked vmlinux are checked against the brand; any leftover "JustinLin099" fails the build.
+#       build_version (#N) and build_date (Now | Other + custom_build_date) set KBUILD_BUILD_VERSION /
+#       KBUILD_BUILD_TIMESTAMP; both are verified in the linked vmlinux version string.
+#   (2) Toolchain choice: aosp (clang_rev, default r547379 = Clang 20; auto-falls back to r536225) | aosp19 |
+#       neutron19 | weebx | zyc_stable. Only 'aosp' has an automatic fallback; explicit picks fail hard.
+#   (3) Final product is an AnyKernel3 ZIP (Image.gz-dtb with the poplar_kddi DTB appended, KernelSU-Next
+#       when enabled). It is structure-checked and the packed Image.gz-dtb is byte-compared with the build.
+#       Packaging is compile/structure-verified only: NOT flash-tested on a device by this workflow.
+# ─────────────────────────────────────────────────────────────────────────────
+# Target : Sony Xperia XZ1 SOV36 (poplar_kddi), msm8998, Linux 4.4.302, arm64, non-GKI
+# Config : arch/arm64/configs/lineage-msm8998-yoshino-poplar_kddi_defconfig (only this one)
+# DTB    : arch/arm/boot/dts/qcom/msm8998-v2.1-yoshino-poplar_kddi.dtb (the only DTB built)
+# Image  : CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y -> Image.gz-dtb = Image.gz + that one DTB (composed with cat)
+# Root   : KernelSU-Next (submodule, legacy branch) in MANUAL hook mode, optional SUSFS, NoMount v2.2.0, Baseband-guard, Re:Kernel.
+#          No ReSukiSU.
+# boot.img is intentionally NOT built (needs SOV36 ramdisk + header params + AVB inputs); AnyKernel3
+# repacks the device's own boot image at flash time instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Kernel branch to build"
+        required: true
+        default: "lineage-22.2"
+        type: string
+      enable_ksun:
+        description: "Build with KernelSU-Next (CONFIG_KSU=y, manual hooks). false = plain kernel"
+        required: true
+        default: true
+        type: boolean
+      enable_susfs:
+        description: "Add SUSFS (requires enable_ksun=true): faryx a9b98d40 SUSFS core + KSUN legacy-susfs commit; manual hooks kept"
+        required: true
+        default: true
+        type: boolean
+      enable_nomount:
+        description: "Add NoMount v2.2.0 VFS path redirection (upstream maxsteeel/nomount tag v2.2.0 + CI-applied 4.4 compat patch; needs the v2.2.0 metamodule). Independent of SUSFS and KSUN"
+        required: true
+        default: true
+        type: boolean
+      enable_bbg:
+        description: "Add Baseband-guard (faryx a9b98d40 files; CONFIG_BBG=y, boot/recovery blocking off). Independent of KSUN, SUSFS and NoMount"
+        required: true
+        default: true
+        type: boolean
+      enable_rekernel:
+        description: "Add Re:Kernel (faryx a9b98d40 drivers/net/rekernel; CONFIG_REKERNEL=y, debug off). Independent of the others. Note: no binder/signal hook sites in this tree"
+        required: true
+        default: true
+        type: boolean
+      toolchain:
+        description: "aosp = AOSP clang (clang_rev, default r547379 = Clang 20, falls back to aosp19) | aosp19 = r536225 | neutron19 = Neutron clang-build-catalogue 10032024 | weebx = WeebX 20.0.0git | zyc_stable = ZyC (URL from Clang-main-link.txt). Only 'aosp' was in the previous workflow; the others are new here and not compile-tested by this file."
+        required: true
+        type: choice
+        options: [aosp, aosp19, neutron19, weebx, zyc_stable]
+        default: aosp
+      clang_rev:
+        description: "Only with toolchain=aosp: AOSP clang revision (e.g. r547379). Empty = r547379 (Clang 20)"
+        required: false
+        default: ""
+        type: string
+      brand:
+        description: "LOCALVERSION suffix. '-am1x[git7]' = '-am1x' + first 7 hex of the kernel branch HEAD."
+        required: true
+        type: choice
+        options:
+          - "-Aegis_Mk1r5"
+          - "-am1x[git7]"
+          - "Other"
+        default: "-am1x[git7]"
+      custom_brand:
+        description: "Custom brand — only if brand=Other (must start with '-')"
+        required: false
+        type: string
+      build_user:
+        description: "KBUILD_BUILD_USER"
+        required: false
+        default: "am1x"
+        type: string
+      build_host:
+        description: "KBUILD_BUILD_HOST"
+        required: false
+        default: "AegisDevLabs"
+        type: string
+      build_version:
+        description: "KBUILD_BUILD_VERSION (the #N token in the version string, digits)"
+        required: false
+        default: "1"
+        type: string
+      build_date:
+        description: "KBUILD_BUILD_TIMESTAMP. 'Now' = current UTC time at build. 'Other' uses custom_build_date (empty => fixed default Thu Jan 1 00:00:00 UTC 2026)."
+        required: true
+        type: choice
+        options:
+          - "Now"
+          - "Other"
+        default: "Now"
+      custom_build_date:
+        description: "Custom build timestamp, date(1) style e.g. 'Wed Oct 28 12:00:00 UTC 2026' — only if build_date=Other"
+        required: false
+        type: string
+      ak3_ref:
+        description: "AnyKernel3 upstream branch or tag (osm0sis/AnyKernel3). Resolved commit is logged. Default master is mutable."
+        required: false
+        default: "master"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aegis-mk1r5-${{ inputs.branch }}-${{ inputs.toolchain }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Aegis Mk1r5 poplar_kddi / ${{ inputs.toolchain }}
+    # neutron19's clang-19 needs GLIBC_2.38 (ubuntu-22.04 ships 2.35 -> binary cannot execute).
+    # Verified by inspecting the release binary: neutron19 max GLIBC_2.38; weebx / zyc_stable max GLIBC_2.34.
+    # Only neutron19 moves to 24.04 (glibc 2.39); every other selection stays on 22.04 as before.
+    runs-on: ${{ inputs.toolchain == 'neutron19' && 'ubuntu-24.04' || 'ubuntu-22.04' }}
+    timeout-minutes: 180
+    env:
+      RELEASE: Mk1r5
+      DEFCONFIG: lineage-msm8998-yoshino-poplar_kddi_defconfig
+      DTB_NAME: msm8998-v2.1-yoshino-poplar_kddi.dtb
+      KDIR: ${{ github.workspace }}/kernel
+      ART: ${{ github.workspace }}/artifacts
+      DIST: ${{ github.workspace }}/dist
+      TC: ${{ github.workspace }}/toolchains
+      BRANCH: ${{ inputs.branch }}
+      ENABLE_KSUN: ${{ inputs.enable_ksun }}
+      ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+      ENABLE_NOMOUNT: ${{ inputs.enable_nomount }}
+      ENABLE_BBG: ${{ inputs.enable_bbg }}
+      ENABLE_REKERNEL: ${{ inputs.enable_rekernel }}
+      # Immutable references (full SHAs). faryx commit: SUSFS/Baseband-guard/Re:Kernel sources. KSUN SUSFS commit: legacy-susfs branch.
+      FARYX_REPO: https://github.com/faryx/android_kernel_sony_msm8998.git
+      FARYX_SHA: a9b98d40658ebcf97522a517b806b71b3415a150
+      KSUN_SUSFS_SHA: 4cc162e027cc36f8e4d4e6a554e9aa07cac4d4f0
+      # NoMount upstream (maxsteeel/nomount): tag v2.2.0 = driver protocol v22; the tag must resolve to this exact commit.
+      NOMOUNT_REPO: https://github.com/maxsteeel/nomount.git
+      NOMOUNT_TAG: v2.2.0
+      NOMOUNT_SHA: bf1847f98fed382369c43bfd652cd93774b9b8e3
+      NOMOUNT_PROTO: "22"
+      IN_TOOLCHAIN: ${{ inputs.toolchain }}
+      CLANG_REV_INPUT: ${{ inputs.clang_rev }}
+      IN_BRAND: ${{ inputs.brand }}
+      IN_CUSTOM_BRAND: ${{ inputs.custom_brand }}
+      IN_BUILD_USER: ${{ inputs.build_user }}
+      IN_BUILD_HOST: ${{ inputs.build_host }}
+      IN_AK3_REF: ${{ inputs.ak3_ref }}
+      IN_BUILD_VERSION: ${{ inputs.build_version }}
+      IN_BUILD_DATE: ${{ inputs.build_date }}
+      IN_CUSTOM_BUILD_DATE: ${{ inputs.custom_build_date }}
+      BUILD_DATE_DEFAULT: "Thu Jan 1 00:00:00 UTC 2026"
+      # AOSP prebuilts/clang: r547379 = Clang 20.0.0, r536225 = Clang 19 (known-good fallback)
+      CLANG20_REV: r547379
+      CLANG19_REV: r536225
+      CLANG_REPO: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+      CLANG_REF: refs/heads/main
+      NEUTRON19_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/10032024/neutron-clang-10032024.tar.zst
+      WEEBX_URL: https://github.com/XSans0/WeebX-Clang/releases/download/WeebX-Clang-20.0.0git-release/WeebX-Clang-20.0.0git.tar.gz
+      WEEBX_SHA256: a2ac878d7f26fc1ac7d90d1330e4e34b62676d3a2326673b78b7799e1d8a0a7c
+      ZYC_LINK_URL: https://raw.githubusercontent.com/ZyCromerZ/Clang/main/Clang-main-link.txt
+      AK3_REPO: https://github.com/osm0sis/AnyKernel3.git
+    steps:
+      - name: Validate workflow inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IN_TOOLCHAIN" =~ ^(aosp|aosp19|neutron19|weebx|zyc_stable)$ ]] || { echo "::error::bad toolchain '$IN_TOOLCHAIN'"; exit 1; }
+          if [ "$IN_TOOLCHAIN" = "aosp" ] && [ -n "$CLANG_REV_INPUT" ]; then
+            [[ "$CLANG_REV_INPUT" =~ ^r[0-9]+[a-z]?$ ]] || { echo "::error::clang_rev must look like r547379 (got '$CLANG_REV_INPUT')"; exit 1; }
+          fi
+          [[ "$IN_BUILD_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad build_user '$IN_BUILD_USER'"; exit 1; }
+          [[ "$IN_BUILD_HOST" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad build_host '$IN_BUILD_HOST'"; exit 1; }
+          [[ "$IN_BUILD_VERSION" =~ ^[0-9]+$ ]] || { echo "::error::build_version must be digits"; exit 1; }
+          [[ "$IN_AK3_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::bad ak3_ref '$IN_AK3_REF'"; exit 1; }
+          if [ "$IN_TOOLCHAIN" != "aosp" ] && [ -n "$CLANG_REV_INPUT" ]; then
+            echo "::notice::clang_rev ignored (toolchain=$IN_TOOLCHAIN)"
+          fi
+          if [ "$ENABLE_SUSFS" = "true" ] && [ "$ENABLE_KSUN" != "true" ]; then
+            echo "::error::enable_susfs=true requires enable_ksun=true (SUSFS is driven by KernelSU-Next)"; exit 1
+          fi
+          echo "inputs OK"
+
+      - name: Checkout kernel (${{ inputs.branch }})
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 1
+          submodules: false
+          path: kernel
+
+      - name: Resolve build identity (brand / user / host)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="$(git -C "$KDIR" rev-parse HEAD)"
+          GIT7="${SHA:0:7}"
+          case "$IN_BRAND" in
+            "Other")        FINAL_BRAND="$IN_CUSTOM_BRAND" ;;
+            "-am1x[git7]")  FINAL_BRAND="-am1x${GIT7}" ;;
+            *)              FINAL_BRAND="$IN_BRAND" ;;
+          esac
+          [[ "$FINAL_BRAND" =~ ^-[A-Za-z0-9._+@:-]+$ ]] || { echo "::error::brand '$FINAL_BRAND' must start with '-' and use [A-Za-z0-9._+@:-]"; exit 1; }
+          case "$FINAL_BRAND" in *JustinLin099*) echo "::error::brand must not contain JustinLin099"; exit 1 ;; esac
+          if [ "$IN_BUILD_DATE" = "Other" ]; then
+            FINAL_DATE="$IN_CUSTOM_BUILD_DATE"
+            if [ -z "$FINAL_DATE" ]; then
+              FINAL_DATE="$BUILD_DATE_DEFAULT"
+              echo "::warning::build_date=Other with empty custom_build_date — using fixed default '$FINAL_DATE'"
+            fi
+          else
+            FINAL_DATE="$(date -u '+%a %b %-d %H:%M:%S UTC %Y')"
+          fi
+          [[ "$FINAL_DATE" =~ ^[A-Za-z0-9\ :+._-]+$ ]] || { echo "::error::bad build date '$FINAL_DATE'"; exit 1; }
+          {
+            echo "KBUILD_BUILD_VERSION=$IN_BUILD_VERSION"
+            echo "KBUILD_BUILD_TIMESTAMP=$FINAL_DATE"
+            echo "BRAND=$FINAL_BRAND"
+            echo "KERNEL_SHA=$SHA"
+            echo "KBUILD_BUILD_USER=$IN_BUILD_USER"
+            echo "KBUILD_BUILD_HOST=$IN_BUILD_HOST"
+          } >> "$GITHUB_ENV"
+          echo "brand=$FINAL_BRAND  kernel HEAD=$SHA  user=$IN_BUILD_USER  host=$IN_BUILD_HOST  ver=#$IN_BUILD_VERSION  ts=$FINAL_DATE"
+
+      - name: Init KernelSU-Next submodule (pinned gitlink)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          mkdir -p "$ART" "$TC" "$DIST"
+          grep -q 'KernelSU-Next' .gitmodules || { echo "::error::KernelSU-Next missing from .gitmodules"; exit 1; }
+          # .gitmodules may still carry an SSH URL on old branches; force HTTPS on the runner.
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync --recursive
+          # Full history + tags on purpose: KSUN Kbuild derives KSU_VERSION from `git rev-list --count`
+          # and KSU_VERSION_TAG from `git describe`; a shallow clone yields a wrong version (30151) and an
+          # empty tag, and Kbuild would try `git fetch --unshallow` in the middle of the build.
+          git submodule update --init KernelSU-Next
+          git -C KernelSU-Next fetch --tags --quiet || true
+          echo "KSUN commits: $(git -C KernelSU-Next rev-list --count HEAD)  tag: $(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo none)"
+          status="$(git submodule status KernelSU-Next)"
+          echo "submodule: $status"
+          case "$status" in
+            [-+U]*) echo "::error::KernelSU-Next not at the pinned commit ($status)"; exit 1 ;;
+          esac
+          [ -L drivers/kernelsu ] || { echo "::error::drivers/kernelsu symlink missing"; exit 1; }
+          [ -f drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu/Kconfig unreachable through symlink"; exit 1; }
+
+      - name: Preflight (target, KSUN hooks, no ReSukiSU)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          D="arch/arm64/configs/$DEFCONFIG"
+          [ -f "$D" ] || { echo "::error::$D not found"; exit 1; }
+          echo "defconfig LOCALVERSION lines (overridden at CI time): $(grep -E '^(# )?CONFIG_LOCALVERSION' "$D" | tr '\n' ' ')"
+          grep -q '^CONFIG_MACH_SONY_POPLAR_KDDI=y' "$D" || { echo "::error::$DEFCONFIG lacks CONFIG_MACH_SONY_POPLAR_KDDI=y"; exit 1; }
+          if grep -qE '^CONFIG_MACH_SONY_(MAPLE|MAPLE_DSDS|POPLAR|POPLAR_DSDS|LILAC|LILAC_DCM)=y' "$D"; then
+            echo "::error::$DEFCONFIG enables another Sony machine"; exit 1
+          fi
+          grep -qx 'CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="qcom/'"${DTB_NAME%.dtb}"'"' "$D" \
+            || { echo "::error::defconfig must append only qcom/${DTB_NAME%.dtb}"; exit 1; }
+          [ -f "arch/arm/boot/dts/qcom/${DTB_NAME%.dtb}.dts" ] || { echo "::error::DTS for $DTB_NAME not found"; exit 1; }
+          # shellcheck disable=SC2016
+          grep -q 'dtb-$(CONFIG_MACH_SONY_POPLAR_KDDI) += '"$DTB_NAME" arch/arm/boot/dts/qcom/Makefile \
+            || { echo "::error::DTB rule for $DTB_NAME missing in qcom/Makefile"; exit 1; }
+
+          # No ReSukiSU / SukiSU anywhere. The checkout must also be pristine w.r.t. SUSFS/NoMount: both are
+          # applied by the steps below, and applying them onto a tree that already carries them would double-patch.
+          # .github is excluded so the workflow files themselves (which name these strings) are not flagged.
+          if hits="$(grep -rIil -e resuki -e sukisu --exclude-dir=.git --exclude-dir=.github . || true)"; [ -n "$hits" ]; then
+            echo "::error::ReSukiSU/SukiSU references found:"; echo "$hits"; exit 1
+          fi
+          if hits="$(grep -rIil -e susfs --exclude-dir=.git --exclude-dir=.github . || true)"; [ -n "$hits" ]; then
+            echo "::error::tree already contains SUSFS references (this workflow patches a pristine tree):"; echo "$hits"; exit 1
+          fi
+          if [ -e fs/susfs.c ] || [ -e fs/nomount ] || [ -e include/linux/susfs.h ]; then
+            echo "::error::tree already has fs/susfs.c, include/linux/susfs.h or fs/nomount"; exit 1
+          fi
+          if [ -e Baseband-guard ] || [ -e security/baseband-guard ] || [ -e security/selinux/include/bbg_tracing.h ] \
+             || [ -e drivers/net/rekernel ] || [ -e include/net/rekernel.h ]; then
+            echo "::error::tree already has Baseband-guard or Re:Kernel files (this workflow patches a pristine tree)"; exit 1
+          fi
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            # KSUN's KSU_SUSFS Kconfig depends on THREAD_INFO_IN_TASK (SUSFS stores per-task flags in thread_info).
+            grep -q 'select THREAD_INFO_IN_TASK' arch/arm64/Kconfig \
+              || { echo "::error::arm64 does not select THREAD_INFO_IN_TASK; KSU_SUSFS cannot be enabled"; exit 1; }
+          fi
+
+          # GKI/kprobe-only symbols must not be set for this 4.4 kernel.
+          if grep -qE '^CONFIG_KSU_(KPROBES_HOOK|TRACEPOINT_HOOK|SUSFS[A-Z_]*)=y' "$D"; then
+            echo "::error::GKI-only/SUSFS KSU option enabled in $DEFCONFIG"; exit 1
+          fi
+
+          # Manual hooks must be in the tree (KSUN Kbuild refuses to build without kernel/reboot.c hook).
+          for pair in "fs/exec.c:ksu_handle_execveat" "fs/open.c:ksu_handle_faccessat" "fs/stat.c:ksu_handle_stat" \
+                      "fs/read_write.c:ksu_handle_sys_read" "kernel/reboot.c:ksu_handle_sys_reboot" \
+                      "security/selinux/hooks.c:is_ksu_transition" "security/selinux/ss/services.c:is_ksu_transition"; do
+            grep -q "${pair#*:}" "${pair%%:*}" || { echo "::error::manual hook ${pair#*:} missing in ${pair%%:*}"; exit 1; }
+          done
+
+          # KSUN Kbuild sed-patches kernel sources at parse time when these are absent. That races with
+          # parallel compilation, so require them to be committed in the tree.
+          chk() { grep -qF -- "$2" "$1" || { echo "::error::backport missing in $1: '$2' (Kbuild would patch it mid-build)"; exit 1; }; }
+          chk fs/namespace.c 'static int can_umount'
+          chk fs/namespace.c 'int path_umount'
+          chk fs/internal.h  'int path_umount'
+          chk include/linux/seccomp.h 'atomic_t filter_count;'
+          chk security/selinux/hooks.c 'selinux_inode(inode)'
+          chk security/selinux/hooks.c 'selinux_cred'
+          chk security/selinux/selinuxfs.c 'selinux_inode(inode)'
+          chk security/selinux/xfrm.c 'selinux_cred'
+          chk security/selinux/include/objsec.h 'selinux_inode'
+          chk security/selinux/include/objsec.h 'selinux_cred'
+          if [ "$ENABLE_NOMOUNT" = "true" ]; then
+            # NoMount v2.2.0 builds on inode/xattr/dentry APIs that the 4.4 compat patch relies on; fail early with a clear message.
+            chk include/linux/xattr.h 'xattr_full_name'
+            chk include/linux/fs.h 'follow_link'
+            chk fs/Kconfig 'endmenu'
+          fi
+          echo "preflight OK"
+
+      - name: Fetch faryx reference commit (SUSFS / Baseband-guard / Re:Kernel sources)
+        if: ${{ inputs.enable_susfs || inputs.enable_bbg || inputs.enable_rekernel }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FX="$RUNNER_TEMP/faryx"
+          rm -rf "$FX"; mkdir -p "$FX"
+          git -C "$FX" init -q
+          # depth 2: the commit and its parent, so the commit can be diffed against its parent.
+          git -C "$FX" fetch -q --depth=2 "$FARYX_REPO" "$FARYX_SHA"
+          [ "$(git -C "$FX" rev-parse FETCH_HEAD)" = "$FARYX_SHA" ] || { echo "::error::fetched faryx commit is not $FARYX_SHA"; exit 1; }
+          git -C "$FX" rev-parse --verify -q "$FARYX_SHA^" >/dev/null || { echo "::error::parent of $FARYX_SHA missing (shallow fetch)"; exit 1; }
+          echo "faryx reference: $(git -C "$FX" log -1 --format='%h %an %ad %s' --date=short "$FARYX_SHA")"
+
+          cat > "$RUNNER_TEMP/filter_hunks.py" <<'PY'
+          #!/usr/bin/env python3
+          """Reduce the faryx diff for fs/namespace.c to its SUSFS-owned changes.
+          The commit also reverts two unrelated backports (vfs_submount(), mntns_owner()). Any contiguous block of
+          '-' lines mentioning either name is turned into context so those functions stay; every other change is kept.
+          Hunks left with no +/- lines are dropped. Output is meant for `git apply --recount`."""
+          import re, sys
+          src, dst = sys.argv[1], sys.argv[2]
+          t = open(src).read()
+          head, *hunks = re.split(r'(?m)^(?=@@ )', t)
+          UNRELATED = re.compile(r'vfs_submount|mntns_owner')
+          out, kept, neutralized = [], 0, 0
+          for h in hunks:
+              lines = h.split("\n")
+              hdr, body = lines[0], lines[1:]
+              i = 0
+              while i < len(body):
+                  if body[i].startswith("-") and not body[i].startswith("---"):
+                      j = i
+                      while j < len(body) and body[j].startswith("-") and not body[j].startswith("---"):
+                          j += 1
+                      if any(UNRELATED.search(l) for l in body[i:j]):
+                          for k in range(i, j):
+                              body[k] = " " + body[k][1:]
+                          neutralized += 1
+                      i = j
+                  else:
+                      i += 1
+              if not any(l.startswith(("+", "-")) and not l.startswith(("+++", "---")) for l in body):
+                  continue
+              out.append("\n".join([hdr] + body)); kept += 1
+          open(dst, "w").write(head + "".join(out))
+          print(f"kept {kept} of {len(hunks)} hunks, neutralized {neutralized} unrelated removal block(s)")
+          PY
+          python3 -c "import ast,sys; ast.parse(open('$RUNNER_TEMP/filter_hunks.py').read())"
+
+      - name: Apply SUSFS (faryx core + KernelSU-Next legacy-susfs commit)
+        if: ${{ inputs.enable_susfs }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$KDIR"
+          FX="$RUNNER_TEMP/faryx"; P="$RUNNER_TEMP/patches"; mkdir -p "$P"
+          fx() { git -C "$FX" diff "$FARYX_SHA^" "$FARYX_SHA" -- "$@"; }
+
+          # 1) kernel side: new core files + SUS_MOUNT hunks of fs/namespace.c (unrelated reverts neutralized)
+          fx fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h > "$P/susfs-new.diff"
+          fx fs/namespace.c > "$P/namespace-full.diff"
+          [ -s "$P/susfs-new.diff" ] && [ -s "$P/namespace-full.diff" ] || { echo "::error::empty faryx diff for SUSFS files"; exit 1; }
+          python3 "$RUNNER_TEMP/filter_hunks.py" "$P/namespace-full.diff" "$P/namespace.diff"
+          git apply --check --recount --whitespace=nowarn "$P/susfs-new.diff" "$P/namespace.diff"
+          git apply --recount --whitespace=nowarn "$P/susfs-new.diff" "$P/namespace.diff"
+
+          # 2) fs/Makefile: one deterministic line (the faryx hunk is not used)
+          python3 - <<'PY'
+          p = "fs/Makefile"; s = open(p).read()
+          line = "obj-$(CONFIG_KSU_SUSFS) += susfs.o\n"
+          assert line not in s, "fs/Makefile already has susfs.o"
+          open(p, "w").write(s + ("" if s.endswith("\n") else "\n") + line)
+          PY
+
+          # 3) KSUN calls susfs_run_sus_path_loop() from kernel/hook/setuid_hook.c; faryx declared it static
+          sed -i 's/^static void susfs_run_sus_path_loop(void)/void susfs_run_sus_path_loop(void)/' fs/susfs.c
+
+          # 4) sanity: expected content landed, unrelated functions survived
+          grep -q '^#define SUSFS_VERSION "v2.3.0"' include/linux/susfs.h || { echo "::error::unexpected SUSFS_VERSION"; exit 1; }
+          grep -q '^void susfs_run_sus_path_loop(void)' fs/susfs.c || { echo "::error::susfs_run_sus_path_loop still static"; exit 1; }
+          [ "$(grep -c 'susfs_get_non_sus_' fs/namespace.c)" -ge 2 ] || { echo "::error::SUS_MOUNT helpers missing in fs/namespace.c"; exit 1; }
+          grep -q 'vfs_submount' fs/namespace.c && grep -q 'mntns_owner' fs/namespace.c || { echo "::error::unrelated functions were removed"; exit 1; }
+          grep -q 'susfs.o' fs/Makefile || { echo "::error::fs/Makefile not updated"; exit 1; }
+
+          # 5) KernelSU-Next side: SUSFS commit on top of the pinned gitlink (pinned = legacy + 1 local commit,
+          #    legacy-susfs = legacy + this one commit; verified to cherry-pick cleanly)
+          git -C KernelSU-Next fetch -q origin legacy-susfs
+          git -C KernelSU-Next cat-file -e "$KSUN_SUSFS_SHA^{commit}" || { echo "::error::$KSUN_SUSFS_SHA not on origin/legacy-susfs"; exit 1; }
+          git -C KernelSU-Next -c user.name=aegis-ci -c user.email=ci@users.noreply.github.com cherry-pick "$KSUN_SUSFS_SHA" >/dev/null \
+            || { echo "::error::cherry-pick of KSUN SUSFS commit failed"; git -C KernelSU-Next status --short | head; exit 1; }
+          git -C KernelSU-Next log -2 --format='KSUN now: %h %s'
+          grep -q 'KSU_SUSFS' KernelSU-Next/kernel/Kconfig || { echo "::error::KernelSU-Next Kconfig lacks KSU_SUSFS after cherry-pick"; exit 1; }
+          echo "SUSFS applied: faryx $FARYX_SHA subset + KSUN $KSUN_SUSFS_SHA"
+
+      - name: Apply NoMount v2.2.0 (upstream maxsteeel/nomount + 4.4 compat patch)
+        if: ${{ inputs.enable_nomount }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$KDIR"
+          NM="$RUNNER_TEMP/nomount-upstream"
+          rm -rf "$NM"; mkdir -p "$NM"
+
+          # 1) fetch the pinned upstream tag and prove it is the commit we reviewed
+          git -C "$NM" init -q
+          git -C "$NM" fetch -q --depth=1 "$NOMOUNT_REPO" "refs/tags/$NOMOUNT_TAG"
+          got="$(git -C "$NM" rev-parse 'FETCH_HEAD^{commit}')"
+          [ "$got" = "$NOMOUNT_SHA" ] || { echo "::error::upstream tag $NOMOUNT_TAG resolves to $got, expected $NOMOUNT_SHA"; exit 1; }
+          git -C "$NM" checkout -q FETCH_HEAD
+          echo "NoMount upstream: $(git -C "$NM" log -1 --format='%h %ad %s' --date=short)"
+
+          # 2) kernel/src must hold exactly the four files this workflow knows how to wire
+          have="$(ls "$NM/kernel/src" | sort | tr '\n' ' ')"
+          [ "$have" = "Kconfig Makefile nomount.c nomount.h " ] || { echo "::error::unexpected files in upstream kernel/src: $have"; exit 1; }
+          grep -qx "#define NOMOUNT_BASE_VERSION \"$NOMOUNT_PROTO\"" "$NM/kernel/src/nomount.h" \
+            || { echo "::error::upstream nomount.h is not driver protocol $NOMOUNT_PROTO"; exit 1; }
+
+          # 3) copy as plain files (no symlink: upstream's Makefile would otherwise walk up looking for a .git of the nomount repo)
+          mkdir -p fs/nomount
+          cp -f "$NM/kernel/src/Kconfig" "$NM/kernel/src/Makefile" "$NM/kernel/src/nomount.c" "$NM/kernel/src/nomount.h" fs/nomount/
+
+          # 4) 4.4 compat port (exact-match edits; any miss aborts the build)
+          cat > "$RUNNER_TEMP/nomount_44_compat.py" <<'PY'
+          #!/usr/bin/env python3
+          """Forward-port NoMount v2.2.0 (upstream maxsteeel/nomount kernel/src) to Linux 4.4.
+
+          Every edit is an exact-string replacement that must match exactly once, otherwise this script exits non-zero.
+          Usage: nomount_44_compat.py <dir containing nomount.c / nomount.h>"""
+          import sys, os
+
+          d = sys.argv[1]
+          H = os.path.join(d, "nomount.h")
+          C = os.path.join(d, "nomount.c")
+          h = open(H).read()
+          c = open(C).read()
+
+          def rep(s, old, new, name):
+              n = s.count(old)
+              if n != 1:
+                  sys.exit("compat patch '%s': expected exactly 1 match, found %d" % (name, n))
+              return s.replace(old, new)
+
+          # ---------------------------------------------------------------- nomount.h
+          # 1) shims placed right before the existing '/* * Compat macros * */' block (all system headers are already included)
+          h = rep(h, "/* * Compat macros * */\n", r'''/* * 4.4 compat shims (added by the Aegis CI port; upstream v2.2.0 supports >= 4.11) * */
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
+          /* full_name_hash() gained a salt argument in 4.16 */
+          #define full_name_hash(salt, name, len) full_name_hash((name), (len))
+          #endif
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 6, 0)
+          #define in_compat_syscall() is_compat_task()
+          #endif
+          #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
+          #define NM_HAS_ITERATE_SHARED 1
+          #endif
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+          /* xattr_handler.{get,set} gained a struct inode * parameter in 4.9; vfs_{get,set}xattr() keep their dentry API */
+          #define NM_XATTR_INODE_ARG      /* nothing */
+          #else
+          #define NM_XATTR_INODE_ARG      , struct inode *inode
+          #endif
+
+          /* * Compat macros * */
+          ''', "h:shims")
+
+          # 2) nm_call_iterate
+          h = rep(h, '''    if (fop->iterate_shared)
+                  return fop->iterate_shared(file, ctx);
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+              else if (fop->iterate)
+                  return fop->iterate(file, ctx);
+          #endif
+              return -ENOTDIR;''', '''#ifdef NM_HAS_ITERATE_SHARED
+              if (fop->iterate_shared)
+                  return fop->iterate_shared(file, ctx);
+          #endif
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+              if (fop->iterate)
+                  return fop->iterate(file, ctx);
+          #endif
+              return -ENOTDIR;''', "h:nm_call_iterate")
+
+          # 3) nm_get_nm_fop
+          h = rep(h, '''    if (fop->iterate_shared == nm_hijacked_iterate_dir)
+                  return container_of(fop, struct nm_dir_ops, fake_fop);
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)''', '''#ifdef NM_HAS_ITERATE_SHARED
+              if (fop->iterate_shared == nm_hijacked_iterate_dir)
+                  return container_of(fop, struct nm_dir_ops, fake_fop);
+          #endif
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)''', "h:nm_get_nm_fop")
+
+          # ---------------------------------------------------------------- nomount.c
+          # 4) get_link (4.5+) vs follow_link (4.4)
+          c = rep(c, '''static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struct delayed_call *done)
+          {''', '''#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 5, 0)
+          /* Linux 4.4: follow_link(dentry, cookie **) replaces get_link() */
+          static const char *nm_follow_link(struct dentry *dentry, void **cookie)
+          {
+              struct inode *v_inode = d_backing_inode(dentry);
+              struct nm_inode_info *info = v_inode->i_private;
+              struct inode *real_inode;
+              if (unlikely(!info || !info->r_path.dentry)) return ERR_PTR(-ECHILD);
+
+              real_inode = d_backing_inode(info->r_path.dentry);
+              if (real_inode && real_inode->i_op && real_inode->i_op->follow_link)
+                  return real_inode->i_op->follow_link(info->r_path.dentry, cookie);
+
+              return ERR_PTR(-EINVAL);
+          }
+          #else
+          static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struct delayed_call *done)
+          {''', "c:get_link open")
+          c = rep(c, '''        return real_inode->i_op->get_link(target_dentry, real_inode, done);
+              }
+
+              return ERR_PTR(-EINVAL);
+          }
+          ''', '''        return real_inode->i_op->get_link(target_dentry, real_inode, done);
+              }
+
+              return ERR_PTR(-EINVAL);
+          }
+          #endif
+          ''', "c:get_link close")
+          c = rep(c, '''    .listxattr = nm_listxattr,
+              .get_link = nm_get_link,
+          };''', '''    .listxattr = nm_listxattr,
+          #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+              .get_link = nm_get_link,
+          #else
+              .follow_link = nm_follow_link,
+          #endif
+          };''', "c:file_iops")
+
+          # 5) xattr handlers
+          c = rep(c, '''static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dentry, struct inode *inode, const char *name, void *buffer, size_t size FLAGS_ARG)
+          {
+              struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
+              if (nm_inode_is_virtual(inode)) {
+                  struct nm_inode_info *info = inode->i_private;
+                  if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
+                  return __vfs_getxattr(info->r_path.dentry, d_inode(info->r_path.dentry), xattr_full_name(handler, name), buffer, size FLAGS_VAL);
+              }
+
+              return proxy->orig->get(proxy->orig, dentry, inode, name, buffer, size FLAGS_VAL);
+          }''', '''static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dentry NM_XATTR_INODE_ARG, const char *name, void *buffer, size_t size FLAGS_ARG)
+          {
+              struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+              struct inode *inode = d_backing_inode(dentry);
+          #endif
+              if (nm_inode_is_virtual(inode)) {
+                  struct nm_inode_info *info = inode->i_private;
+                  if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+                  return vfs_getxattr(info->r_path.dentry, xattr_full_name(handler, name), buffer, size);
+          #else
+                  return __vfs_getxattr(info->r_path.dentry, d_inode(info->r_path.dentry), xattr_full_name(handler, name), buffer, size FLAGS_VAL);
+          #endif
+              }
+
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+              return proxy->orig->get(proxy->orig, dentry, name, buffer, size);
+          #else
+              return proxy->orig->get(proxy->orig, dentry, inode, name, buffer, size FLAGS_VAL);
+          #endif
+          }''', "c:xattr_get")
+          c = rep(c, '''static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct dentry *dentry, struct inode *inode, const char *name, const void *buffer, size_t size, int flags)
+          {
+              struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
+              if (nm_inode_is_virtual(inode)) {
+                  struct nm_inode_info *info = inode->i_private;
+                  if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
+                  return __vfs_setxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, d_inode(info->r_path.dentry), xattr_full_name(handler, name), buffer, size, flags);
+              }
+              return proxy->orig->set(proxy->orig, IDMAP_CALL dentry, inode, name, buffer, size, flags);
+          }''', '''static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct dentry *dentry NM_XATTR_INODE_ARG, const char *name, const void *buffer, size_t size, int flags)
+          {
+              struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+              struct inode *inode = d_backing_inode(dentry);
+          #endif
+              if (nm_inode_is_virtual(inode)) {
+                  struct nm_inode_info *info = inode->i_private;
+                  if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+                  return vfs_setxattr(info->r_path.dentry, xattr_full_name(handler, name), buffer, size, flags);
+          #else
+                  return __vfs_setxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, d_inode(info->r_path.dentry), xattr_full_name(handler, name), buffer, size, flags);
+          #endif
+              }
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+              return proxy->orig->set(proxy->orig, dentry, name, buffer, size, flags);
+          #else
+              return proxy->orig->set(proxy->orig, IDMAP_CALL dentry, inode, name, buffer, size, flags);
+          #endif
+          }''', "c:xattr_set")
+
+          # 6) directory file_operations / hijack: iterate_shared exists from 4.7
+          c = rep(c, '''    .iterate_shared = nm_dir_iterate_dir,
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+              .iterate = nm_dir_iterate_dir,
+          #endif''', '''#ifdef NM_HAS_ITERATE_SHARED
+              .iterate_shared = nm_dir_iterate_dir,
+          #endif
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+              .iterate = nm_dir_iterate_dir,
+          #endif''', "c:dir_fops")
+          c = rep(c, '''    bool iterate = fop && (fop->iterate_shared
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+                  || fop->iterate
+          #endif
+              );''', '''    bool iterate = fop && (0
+          #ifdef NM_HAS_ITERATE_SHARED
+                  || fop->iterate_shared
+          #endif
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+                  || fop->iterate
+          #endif
+              );''', "c:hijack iterate flag")
+          c = rep(c, '''        if (fop->iterate_shared) ops->fake_fop.iterate_shared = nm_hijacked_iterate_dir;
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)''', '''#ifdef NM_HAS_ITERATE_SHARED
+                  if (fop->iterate_shared) ops->fake_fop.iterate_shared = nm_hijacked_iterate_dir;
+          #endif
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)''', "c:hijack fake_fop")
+
+          open(H, "w").write(h)
+          open(C, "w").write(c)
+          print("NoMount 4.4 compat patch applied (%s)" % d)
+          PY
+          python3 "$RUNNER_TEMP/nomount_44_compat.py" fs/nomount
+
+          # 5) wire into fs/Kconfig (before the last `endmenu`, as upstream setup.sh does) and fs/Makefile
+          python3 - <<'PY'
+          p = "fs/Makefile"; s = open(p).read()
+          assert "nomount" not in s, "fs/Makefile already wired for NoMount"
+          open(p, "w").write(s + ("" if s.endswith("\n") else "\n") + "obj-$(CONFIG_NOMOUNT)\t\t+= nomount/\n")
+          p = "fs/Kconfig"; lines = open(p).read().split("\n")
+          assert not any("nomount" in l for l in lines), "fs/Kconfig already wired for NoMount"
+          idx = max(i for i, l in enumerate(lines) if l.startswith("endmenu"))
+          lines.insert(idx, 'source "fs/nomount/Kconfig"')
+          open(p, "w").write("\n".join(lines))
+          PY
+          grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig || { echo "::error::fs/Kconfig does not source fs/nomount/Kconfig"; exit 1; }
+          grep -q 'nomount/' fs/Makefile || { echo "::error::fs/Makefile not updated"; exit 1; }
+          grep -q 'NM_HAS_ITERATE_SHARED' fs/nomount/nomount.h || { echo "::error::compat patch not present in fs/nomount/nomount.h"; exit 1; }
+          echo "NoMount applied: upstream $NOMOUNT_TAG ($(grep -E 'define NOMOUNT_BASE_VERSION' fs/nomount/nomount.h)) + 4.4 compat patch"
+
+      - name: Apply Baseband-guard (faryx files + SELinux hunks)
+        if: ${{ inputs.enable_bbg }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$KDIR"
+          FX="$RUNNER_TEMP/faryx"; P="$RUNNER_TEMP/patches"; mkdir -p "$P"
+          [ ! -e Baseband-guard ] && [ ! -e security/baseband-guard ] || { echo "::error::Baseband-guard already present"; exit 1; }
+
+          # Same layout as the commit: Baseband-guard/ at the tree root, reached through two symlinks.
+          git -C "$FX" archive "$FARYX_SHA" Baseband-guard | tar -x -C "$KDIR"
+          for f in Kconfig Makefile baseband_guard.c baseband_guard.h blkdev_helper.c blkdev_helper.h kernel_compat.h \
+                   tracing/Makefile tracing/tracing.c tracing/tracing.h; do
+            [ -s "Baseband-guard/$f" ] || { echo "::error::Baseband-guard/$f missing after extraction"; exit 1; }
+          done
+          ln -s ../Baseband-guard security/baseband-guard
+          ln -s ../../../Baseband-guard/tracing/tracing.h security/selinux/include/bbg_tracing.h
+          [ -f security/baseband-guard/Kconfig ] && [ -f security/selinux/include/bbg_tracing.h ] \
+            || { echo "::error::Baseband-guard symlinks do not resolve"; exit 1; }
+
+          # objsec.h (bbg_cred in task_security_struct) and selinux/Makefile: the commit's own hunks.
+          git -C "$FX" diff "$FARYX_SHA^" "$FARYX_SHA" -- security/selinux/include/objsec.h security/selinux/Makefile > "$P/bbg.diff"
+          [ -s "$P/bbg.diff" ] || { echo "::error::empty faryx diff for Baseband-guard hunks"; exit 1; }
+          git apply --check --recount --whitespace=nowarn "$P/bbg.diff"
+          git apply --recount --whitespace=nowarn "$P/bbg.diff"
+
+          # security/Makefile and security/Kconfig: one line each, same as the commit.
+          python3 - <<'PY'
+          for p, line in (("security/Makefile", "obj-$(CONFIG_BBG) += baseband-guard/\n"),
+                          ("security/Kconfig", 'source "security/baseband-guard/Kconfig"\n')):
+              s = open(p).read()
+              assert line.strip() not in s, p + " already wired for Baseband-guard"
+              open(p, "w").write(s + ("" if s.endswith("\n") else "\n") + line)
+          PY
+          grep -q 'bbg_cred' security/selinux/include/objsec.h || { echo "::error::objsec.h lacks bbg_cred"; exit 1; }
+          grep -q 'baseband-guard/' security/Makefile || { echo "::error::security/Makefile not updated"; exit 1; }
+          grep -q 'baseband-guard/Kconfig' security/Kconfig || { echo "::error::security/Kconfig not updated"; exit 1; }
+          echo "Baseband-guard applied: $(git -C "$FX" log -1 --format=%h "$FARYX_SHA") (BBG_BLOCK_BOOT/RECOVERY stay off)"
+
+      - name: Apply Re:Kernel (faryx files)
+        if: ${{ inputs.enable_rekernel }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$KDIR"
+          FX="$RUNNER_TEMP/faryx"
+          [ ! -e drivers/net/rekernel ] && [ ! -e include/net/rekernel.h ] || { echo "::error::Re:Kernel already present"; exit 1; }
+          mkdir -p drivers/net/rekernel
+          for f in drivers/net/rekernel/Kconfig drivers/net/rekernel/Makefile drivers/net/rekernel/rekernel.c \
+                   drivers/net/rekernel/rekernel.h include/net/rekernel.h; do
+            git -C "$FX" show "$FARYX_SHA:$f" > "$f"
+            [ -s "$f" ] || { echo "::error::could not extract $f from $FARYX_SHA"; exit 1; }
+          done
+          python3 - <<'PY'
+          # drivers/net/Makefile: one line. drivers/net/Kconfig: the commit sources it inside `if NETDEVICES`,
+          # right before the closing `endif # NETDEVICES`.
+          p = "drivers/net/Makefile"; s = open(p).read()
+          assert "rekernel" not in s, p + " already wired for Re:Kernel"
+          open(p, "w").write(s + ("" if s.endswith("\n") else "\n") + "obj-$(CONFIG_REKERNEL) += rekernel/\n")
+          p = "drivers/net/Kconfig"; lines = open(p).read().split("\n")
+          assert not any("rekernel" in l for l in lines), p + " already wired for Re:Kernel"
+          idx = max(i for i, l in enumerate(lines) if l.strip().startswith("endif") and "NETDEVICES" in l)
+          lines.insert(idx, 'source "drivers/net/rekernel/Kconfig"')
+          open(p, "w").write("\n".join(lines))
+          PY
+          grep -q 'rekernel/' drivers/net/Makefile || { echo "::error::drivers/net/Makefile not updated"; exit 1; }
+          grep -q 'rekernel/Kconfig' drivers/net/Kconfig || { echo "::error::drivers/net/Kconfig not updated"; exit 1; }
+          echo "Re:Kernel applied: $(wc -l < drivers/net/rekernel/rekernel.c) lines of driver"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # arm-linux-gnueabi: CONFIG_COMPAT_VDSO=y needs the 32-bit GNU binutils (-no-integrated-as).
+          # zstd: Neutron archives are .tar.zst.  zip/unzip: AnyKernel3 packaging + verification.
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev zlib1g-dev make gcc g++ perl python3 cpio kmod \
+            xz-utils lz4 zstd zip unzip git curl ca-certificates \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Write toolchain helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/tc-lib.sh" <<'LIB'
+          # tc_fetch <id> <url> <fmt: tar.gz|tar.xz|tar.zst> [sha256]
+          # Downloads, optionally SHA-verifies, extracts, smoke-tests clang.
+          # On success sets TC_ID, TC_BIN_DIR, TC_VERSION and returns 0; any failure returns 1.
+          tc_fetch() {
+            local id="$1" url="$2" fmt="$3" want="${4:-}" archive dir code sha ver bindir
+            archive="$TC/$id.archive"; dir="$TC/$id"
+            echo "::group::toolchain $id"
+            echo "download URL        : $url"
+            code="$(curl -sS -L -o "$archive" -w '%{http_code}' --retry 3 --retry-delay 5 --connect-timeout 30 "$url" || true)"; code="${code:-000}"
+            echo "download HTTP       : $code"
+            if [ "$code" != "200" ] || [ ! -s "$archive" ]; then
+              echo "::warning::download of $id failed (HTTP $code)"; echo "::endgroup::"; return 1
+            fi
+            sha="$(sha256sum "$archive" | cut -d' ' -f1)"
+            echo "archive size        : $(stat -c%s "$archive")"
+            echo "archive SHA256      : $sha"
+            if [ -n "$want" ] && [ "$sha" != "$want" ]; then
+              echo "::warning::SHA-256 mismatch for $id (expected $want)"; rm -f "$archive"; echo "::endgroup::"; return 1
+            fi
+            rm -rf "$dir"; mkdir -p "$dir"
+            case "$fmt" in
+              tar.gz)  tar -xzf "$archive" -C "$dir" ;;
+              tar.xz)  tar -xJf "$archive" -C "$dir" ;;
+              tar.zst) tar -I zstd -xf "$archive" -C "$dir" ;;
+              *) echo "::warning::unsupported archive format '$fmt'"; echo "::endgroup::"; return 1 ;;
+            esac || { echo "::warning::extract of $id failed"; echo "::endgroup::"; return 1; }
+            rm -f "$archive"
+            bindir="$(find "$dir" -name clang \( -type f -o -type l \) -path '*/bin/clang' -printf '%d\t%h\n' | sort -n | sed -n '1p' | cut -f2)"
+            if [ -z "$bindir" ]; then
+              echo "::warning::no bin/clang found in $id"; echo "::endgroup::"; return 1
+            fi
+            if ! ver="$("$bindir/clang" --version 2>&1)"; then
+              local need host
+              need="$(objdump -T "$(readlink -f "$bindir/clang")" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -n1)"
+              host="$(ldd --version 2>&1 | sed -n '1p')"
+              {
+                echo "clang from $id does not execute"
+                echo "error      : $ver"
+                echo "binary needs: ${need:-unknown}"
+                echo "host glibc : $host"
+              } | tee "$ART/toolchain-fail-$id.txt"
+              echo "::warning::clang from $id does not execute: $(printf '%s' "$ver" | sed -n '1p') [binary needs ${need:-?}; $host]"
+              echo "::endgroup::"; return 1
+            fi
+            ver="$(printf '%s\n' "$ver" | sed -n '1p')"
+            echo "bin dir             : $bindir"
+            echo "extracted version   : $ver"
+            [ -x "$bindir/ld.lld" ] && echo "ld.lld              : present" || echo "::warning::ld.lld not found next to clang"
+            {
+              echo "id=$id"; echo "url=$url"; echo "http=$code"; echo "sha256=$sha"; echo "version=$ver"
+            } > "$ART/toolchain-info-$id.txt"
+            echo "::endgroup::"
+            TC_ID="$id"; TC_BIN_DIR="$bindir"; TC_VERSION="$ver"
+            return 0
+          }
+
+          # tc_aosp <rev>: verify the revision exists in prebuilts/clang, then tc_fetch it.
+          tc_aosp() {
+            local rev="$1" meta_url code
+            meta_url="$CLANG_REPO/+/$CLANG_REF/clang-$rev/AndroidVersion.txt?format=TEXT"
+            echo "::group::aosp clang $rev existence check"
+            echo "existence check URL : $meta_url"
+            code="$(curl -sS -L -o "$TC/AndroidVersion-$rev.b64" -w '%{http_code}' --retry 3 --retry-delay 5 "$meta_url" || true)"; code="${code:-000}"
+            echo "existence check HTTP: $code"
+            if [ "$code" != "200" ]; then
+              echo "::warning::clang-$rev not found in $CLANG_REPO@$CLANG_REF (HTTP $code)"; echo "::endgroup::"; return 1
+            fi
+            echo "AndroidVersion.txt  : $(base64 -d "$TC/AndroidVersion-$rev.b64" 2>/dev/null | tr '\n' ' ')"
+            echo "::endgroup::"
+            tc_fetch "aosp-$rev" "$CLANG_REPO/+archive/$CLANG_REF/clang-$rev.tar.gz" tar.gz ""
+          }
+
+          # tc_acquire <toolchain-name>
+          tc_acquire() {
+            local url fmt
+            case "$1" in
+              aosp)       tc_aosp "${CLANG_REV_INPUT:-$CLANG20_REV}" ;;
+              aosp19)     tc_aosp "$CLANG19_REV" ;;
+              neutron19)  tc_fetch neutron19 "$NEUTRON19_URL" tar.zst "" ;;
+              weebx)      tc_fetch weebx "$WEEBX_URL" tar.gz "$WEEBX_SHA256" ;;
+              zyc_stable)
+                url="$(curl -fsSL --retry 3 "$ZYC_LINK_URL" | sed -n '1p' | tr -d '\r' || true)"
+                case "$url" in
+                  https://*.tar.gz|https://*.tgz) fmt=tar.gz ;;
+                  https://*.tar.xz)               fmt=tar.xz ;;
+                  https://*.tar.zst)              fmt=tar.zst ;;
+                  *) echo "::warning::zyc_stable: cannot derive URL/format from link file (got '$url')"; return 1 ;;
+                esac
+                tc_fetch "zyc_stable" "$url" "$fmt" "" ;;
+              *) echo "::warning::unknown toolchain '$1'"; return 1 ;;
+            esac
+          }
+          LIB
+          bash -n "$RUNNER_TEMP/tc-lib.sh"
+
+      - name: Acquire toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/tc-lib.sh"
+          TC_ID=""; TC_BIN_DIR=""; TC_VERSION=""
+          used=""
+          if tc_acquire "$IN_TOOLCHAIN"; then
+            used="$TC_ID"
+          elif [ "$IN_TOOLCHAIN" = "aosp" ]; then
+            echo "::warning::primary AOSP clang unavailable; falling back to aosp-$CLANG19_REV"
+            if tc_acquire aosp19; then used="$TC_ID"; fi
+          fi
+          [ -n "$used" ] || { echo "::error::no usable toolchain (requested '$IN_TOOLCHAIN')"; exit 1; }
+          {
+            echo "TC_USED=$used"
+            echo "TC_PRIMARY=$IN_TOOLCHAIN"
+          } >> "$GITHUB_ENV"
+          echo "$TC_BIN_DIR" >> "$GITHUB_PATH"
+          echo "using toolchain $used: $TC_VERSION"
+
+      - name: Configure (defconfig, brand, non-interactive) and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          cat > "$RUNNER_TEMP/make-args.sh" <<'EOF'
+          MAKE_ARGS=(O=out ARCH=arm64 SUBARCH=arm64
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CC=clang LLVM=1 CLANG_TRIPLE=aarch64-linux-gnu-
+            HOSTCC="gcc -fcommon" HOSTCXX=g++)
+          EOF
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/make-args.sh"
+          rm -rf out
+
+          make "${MAKE_ARGS[@]}" "$DEFCONFIG" </dev/null
+          if [ "$ENABLE_KSUN" != "true" ]; then
+            ./scripts/config --file out/.config -d KSU
+          fi
+          # SUSFS option set = the faryx defconfig list + KSUN's TRY_UMOUNT (its Kconfig defaults all of them to y).
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            ./scripts/config --file out/.config -e KSU_SUSFS \
+              -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_TRY_UMOUNT \
+              -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+              -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP
+          fi
+          if [ "$ENABLE_NOMOUNT" = "true" ]; then
+            ./scripts/config --file out/.config -e NOMOUNT
+          fi
+          # Baseband-guard boot/recovery blocking stay off: BBG_BLOCK_BOOT would make the AnyKernel3 flash from Android fail.
+          if [ "$ENABLE_BBG" = "true" ]; then
+            ./scripts/config --file out/.config -e BBG -d BBG_BLOCK_BOOT -d BBG_BLOCK_RECOVERY
+          fi
+          if [ "$ENABLE_REKERNEL" = "true" ]; then
+            ./scripts/config --file out/.config -e REKERNEL -d REKERNEL_DEBUG
+          fi
+          # Branding: force LOCALVERSION and drop the git-derived auto suffix so the release string is
+          # exactly <kernelversion><BRAND>.
+          ./scripts/config --file out/.config --set-str LOCALVERSION "$BRAND" -d LOCALVERSION_AUTO
+          make "${MAKE_ARGS[@]}" olddefconfig </dev/null
+
+          # Resolution must be stable and prompt-free: a second pass changes nothing,
+          # and silentoldconfig (run by the real build) must not need input.
+          cp out/.config "$RUNNER_TEMP/config.pass1"
+          make "${MAKE_ARGS[@]}" olddefconfig </dev/null
+          cmp -s out/.config "$RUNNER_TEMP/config.pass1" || { echo "::error::config not stable across olddefconfig passes"; diff "$RUNNER_TEMP/config.pass1" out/.config | head -40; exit 1; }
+          make "${MAKE_ARGS[@]}" silentoldconfig </dev/null
+
+          if EMPTY="$(grep -nE '^CONFIG_[A-Za-z0-9_]+=$' out/.config)"; [ -n "$EMPTY" ]; then
+            echo "::error::empty config values (would prompt): $(echo "$EMPTY" | tr '\n' ' ')"; exit 1
+          fi
+          must() { grep -qxF -- "$1" out/.config || { echo "::error::missing in resolved .config: $1"; exit 1; }; }
+          mustnot() { if grep -qxE -- "$1" out/.config; then echo "::error::unexpected in resolved .config: $1"; exit 1; fi; }
+          must CONFIG_MACH_SONY_POPLAR_KDDI=y
+          must CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
+          must 'CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="qcom/msm8998-v2.1-yoshino-poplar_kddi"'
+          must CONFIG_LITTLE_CPU_MASK=15
+          must CONFIG_BIG_CPU_MASK=240
+          must "CONFIG_LOCALVERSION=\"$BRAND\""
+          mustnot 'CONFIG_LOCALVERSION_AUTO=y'
+          mustnot '.*JustinLin099.*'
+          mustnot 'CONFIG_MACH_SONY_(MAPLE|MAPLE_DSDS|POPLAR|POPLAR_DSDS|LILAC|LILAC_DCM)=y'
+          mustnot 'CONFIG_KSU_(KPROBES_HOOK|TRACEPOINT_HOOK)=y'
+          if [ "$ENABLE_KSUN" = "true" ]; then
+            must CONFIG_KSU=y
+            must CONFIG_KSU_MANUAL_HOOK=y
+            if [ "$ENABLE_SUSFS" = "true" ]; then
+              for o in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_TRY_UMOUNT \
+                       KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+                       KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
+                must "CONFIG_$o=y"
+              done
+            else
+              mustnot 'CONFIG_KSU_SUSFS[A-Z_]*=[ym]'
+            fi
+          else
+            mustnot 'CONFIG_KSU=[ym]'
+            mustnot 'CONFIG_KSU_SUSFS[A-Z_]*=[ym]'
+          fi
+          if [ "$ENABLE_NOMOUNT" = "true" ]; then must CONFIG_NOMOUNT=y; else mustnot 'CONFIG_NOMOUNT=[ym]'; fi
+          if [ "$ENABLE_BBG" = "true" ]; then
+            must CONFIG_BBG=y
+            mustnot 'CONFIG_BBG_BLOCK_(BOOT|RECOVERY)=y'
+          else
+            mustnot 'CONFIG_BBG=[ym]'
+          fi
+          if [ "$ENABLE_REKERNEL" = "true" ]; then
+            must CONFIG_REKERNEL=y
+            mustnot 'CONFIG_REKERNEL_DEBUG=y'
+          else
+            mustnot 'CONFIG_REKERNEL=[ym]'
+          fi
+          grep -E '^(# )?CONFIG_(KSU|NOMOUNT|BBG|REKERNEL|MACH_SONY_|BUILD_ARM64_APPENDED|LOCALVERSION)' out/.config
+
+      - name: Build poplar_kddi DTB and Image.gz-dtb (poplar_kddi DTB only)
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$KDIR"
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/make-args.sh"
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/tc-lib.sh"
+          : > "$ART/build.log"
+
+          build() {
+            local jobs; jobs="$(nproc)"
+            {
+              echo "=== clang: $(clang --version | head -1)"
+              # flask.h is generated under security/selinux and included by drivers/kernelsu;
+              # generate it first so parallel descent cannot race.
+              make -j"$jobs" "${MAKE_ARGS[@]}" security/selinux/ &&
+              make -j"$jobs" "${MAKE_ARGS[@]}" "qcom/$DTB_NAME" &&
+              make -j"$jobs" "${MAKE_ARGS[@]}" Image.gz &&
+              cat out/arch/arm64/boot/Image.gz "out/arch/arm64/boot/dts/qcom/$DTB_NAME" > out/arch/arm64/boot/Image.gz-dtb
+            } 2>&1 | tee -a "$ART/build.log"
+            return "${PIPESTATUS[0]}"
+          }
+
+          if build; then
+            echo "BUILD_TC=$TC_USED" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "::warning::build failed with toolchain $TC_USED"
+          # Automatic fallback exists only for the 'aosp' selection (AOSP r547379 -> r536225).
+          if [ "$TC_PRIMARY" != "aosp" ] || [ "$TC_USED" = "aosp-$CLANG19_REV" ]; then
+            echo "::error::build failed with toolchain $TC_USED (no automatic fallback for this selection)"; exit 1
+          fi
+          echo "::warning::retrying clean build with fallback aosp-$CLANG19_REV"
+          TC_ID=""; TC_BIN_DIR=""; TC_VERSION=""
+          tc_acquire aosp19 || { echo "::error::fallback clang unavailable"; exit 1; }
+          export PATH="$TC_BIN_DIR:$PATH"
+          cp out/.config "$RUNNER_TEMP/config.keep"
+          rm -rf out && mkdir -p out && cp "$RUNNER_TEMP/config.keep" out/.config
+          make "${MAKE_ARGS[@]}" olddefconfig </dev/null
+          echo "=== RETRY WITH FALLBACK CLANG $CLANG19_REV ===" >> "$ART/build.log"
+          build || { echo "::error::build failed with fallback clang $CLANG19_REV"; exit 1; }
+          echo "TC_USED=$TC_ID" >> "$GITHUB_ENV"
+          echo "BUILD_TC=$TC_ID" >> "$GITHUB_ENV"
+
+      - name: Verify outputs, brand and collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$KDIR"
+          B=out/arch/arm64/boot
+
+          mapfile -t ALL_DTB < <(find -L "$B/dts" -name '*.dtb' | sort)
+          mapfile -t KDDI_DTB < <(find -L "$B/dts" -name '*poplar_kddi*.dtb' | sort)
+          echo "all dtbs     : ${ALL_DTB[*]:-none}"
+          echo "poplar_kddi  : ${KDDI_DTB[*]:-none}"
+          [ "${#KDDI_DTB[@]}" -eq 1 ] || { echo "::error::expected exactly 1 poplar_kddi DTB, found ${#KDDI_DTB[@]}"; exit 1; }
+          [ "$(basename "${KDDI_DTB[0]}")" = "$DTB_NAME" ] || { echo "::error::unexpected DTB ${KDDI_DTB[0]}"; exit 1; }
+          [ "${#ALL_DTB[@]}" -eq 1 ] || { echo "::error::Image.gz-dtb would append ${#ALL_DTB[@]} DTBs, expected only poplar_kddi"; exit 1; }
+
+          if [ ! -s "$B/Image.gz" ] || [ ! -s "$B/Image.gz-dtb" ]; then
+            echo "::error::Image.gz / Image.gz-dtb missing"; exit 1
+          fi
+          gz="$(stat -c%s "$B/Image.gz")"; dtb="$(stat -c%s "${KDDI_DTB[0]}")"; tot="$(stat -c%s "$B/Image.gz-dtb")"
+          [ "$tot" -eq $((gz + dtb)) ] || { echo "::error::Image.gz-dtb size $tot != Image.gz $gz + dtb $dtb"; exit 1; }
+          head -c "$gz" "$B/Image.gz-dtb" | cmp - "$B/Image.gz" || { echo "::error::Image.gz-dtb does not start with Image.gz"; exit 1; }
+          tail -c "$dtb" "$B/Image.gz-dtb" | cmp - "${KDDI_DTB[0]}" || { echo "::error::Image.gz-dtb does not end with the poplar_kddi DTB"; exit 1; }
+
+          # Brand: kernel.release must end with the brand; the linked vmlinux must carry it too.
+          KREL="$(cat out/include/config/kernel.release)"
+          echo "kernel.release: $KREL"
+          case "$KREL" in *"$BRAND") ;; *) echo "::error::kernel.release '$KREL' does not end with brand '$BRAND'"; exit 1 ;; esac
+          case "$KREL" in *JustinLin099*) echo "::error::JustinLin099 still present in kernel.release"; exit 1 ;; esac
+          strings -n 8 out/vmlinux 2>/dev/null | grep -m1 'Linux version' > "$ART/linux_version.txt" || true
+          [ -s "$ART/linux_version.txt" ] || { echo "::error::no 'Linux version' string found in vmlinux"; exit 1; }
+          cat "$ART/linux_version.txt"
+          grep -qF -- "$KREL" "$ART/linux_version.txt" || { echo "::error::vmlinux version string lacks '$KREL'"; exit 1; }
+          grep -qF -- "#$KBUILD_BUILD_VERSION " "$ART/linux_version.txt" || { echo "::error::version string lacks '#$KBUILD_BUILD_VERSION'"; exit 1; }
+          grep -qF -- "$KBUILD_BUILD_TIMESTAMP" "$ART/linux_version.txt" || { echo "::error::version string lacks timestamp '$KBUILD_BUILD_TIMESTAMP'"; exit 1; }
+          if grep -q 'JustinLin099' "$ART/linux_version.txt"; then echo "::error::JustinLin099 in vmlinux version string"; exit 1; fi
+
+          if [ "$ENABLE_KSUN" = "true" ]; then
+            grep -qE ' [Tt] ksu_' out/System.map || { echo "::error::no ksu_* symbols linked into vmlinux"; exit 1; }
+            grep -qE ' [Tt] ksu_handle_(execveat|sys_reboot|faccessat|stat)' out/System.map \
+              || { echo "::error::manual hook entry points not linked"; exit 1; }
+          fi
+
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            for sym in susfs_init susfs_run_sus_path_loop susfs_get_non_sus_mnt_id_from_mnt susfs_try_umount; do
+              grep -qE " [Tt] $sym\$" out/System.map || { echo "::error::SUSFS symbol $sym not linked"; exit 1; }
+            done
+          fi
+          if [ "$ENABLE_NOMOUNT" = "true" ]; then
+            grep -qE ' [Tt] nomount_init$' out/System.map || { echo "::error::nomount_init not linked"; exit 1; }
+            # v2.2.0 driver: the compat shims must have selected the 4.4 code paths (nm_follow_link replaces nm_get_link below 4.5).
+            grep -qE ' [Tt] nm_follow_link$' out/System.map || echo "::warning::nm_follow_link not in System.map (inlined, or the 4.5+ get_link path was built?)"
+          fi
+          if [ "$ENABLE_BBG" = "true" ]; then
+            grep -qE ' [Tt] bbg_init$' out/System.map || { echo "::error::bbg_init not linked"; exit 1; }
+          fi
+          if [ "$ENABLE_REKERNEL" = "true" ]; then
+            grep -qE ' [Tt] rekernel_init$' out/System.map || { echo "::error::rekernel_init not linked"; exit 1; }
+          fi
+          {
+            echo "ksun=$ENABLE_KSUN  susfs=$ENABLE_SUSFS  nomount=$ENABLE_NOMOUNT  bbg=$ENABLE_BBG  rekernel=$ENABLE_REKERNEL"
+            if [ "$ENABLE_BBG" = "true" ] || [ "$ENABLE_REKERNEL" = "true" ]; then
+              echo "bbg/rekernel: source=faryx@$FARYX_SHA"
+            fi
+            if [ "$ENABLE_SUSFS" = "true" ]; then
+              echo "susfs: $(grep -E '^#define SUSFS_VERSION' include/linux/susfs.h)  source=faryx@$FARYX_SHA  ksun_commit=$KSUN_SUSFS_SHA"
+            fi
+            if [ "$ENABLE_NOMOUNT" = "true" ]; then
+              echo "nomount: $NOMOUNT_TAG ($(grep -E 'define NOMOUNT_BASE_VERSION' fs/nomount/nomount.h))  source=maxsteeel/nomount@$NOMOUNT_SHA + 4.4 compat patch  (needs the matching NoMount $NOMOUNT_TAG metamodule)"
+            fi
+            echo "ksun head: $(git -C KernelSU-Next log -1 --format='%h %s' 2>/dev/null || echo n/a)"
+          } > "$ART/features.txt"
+          cat "$ART/features.txt"
+
+          cp "$B/Image.gz" "$B/Image.gz-dtb" "$ART/"
+          cp "${KDDI_DTB[0]}" "$ART/"
+          cp out/.config "$ART/resolved.config"
+          git -C "$KDIR" submodule status KernelSU-Next > "$ART/ksun_submodule.txt" || true
+          echo "$KERNEL_SHA" > "$ART/kernel_head_sha.txt"
+
+      - name: Package AnyKernel3 ZIP (final product)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          B="$KDIR/out/arch/arm64/boot"
+          KREL="$(cat "$KDIR/out/include/config/kernel.release")"
+          AKSRC="$RUNNER_TEMP/ak3-src"; STAGE="$RUNNER_TEMP/ak3-stage"
+          rm -rf "$AKSRC" "$STAGE"; mkdir -p "$STAGE" "$DIST"
+
+          git clone --depth=1 --branch "$IN_AK3_REF" "$AK3_REPO" "$AKSRC"
+          echo "AnyKernel3 $IN_AK3_REF @ $(git -C "$AKSRC" rev-parse HEAD)" | tee "$ART/anykernel3-commit.txt"
+          for f in META-INF tools modules patch ramdisk LICENSE; do
+            [ -e "$AKSRC/$f" ] || { echo "::error::AnyKernel3 upstream lacks '$f'"; exit 1; }
+            cp -a "$AKSRC/$f" "$STAGE/"
+          done
+          [ -f "$STAGE/tools/ak3-core.sh" ] || { echo "::error::tools/ak3-core.sh missing"; exit 1; }
+          [ -f "$STAGE/META-INF/com/google/android/update-binary" ] || { echo "::error::update-binary missing"; exit 1; }
+
+          # Kernel payload: DTB is already appended, so no separate dtb file is shipped.
+          cp "$B/Image.gz-dtb" "$STAGE/Image.gz-dtb"
+
+          KSU_LABEL="no root"
+          if [ "$ENABLE_KSUN" = "true" ]; then KSU_LABEL="KernelSU-Next"; fi
+          if [ "$ENABLE_SUSFS" = "true" ]; then KSU_LABEL="${KSU_LABEL} + SUSFS"; fi
+          if [ "$ENABLE_NOMOUNT" = "true" ]; then KSU_LABEL="${KSU_LABEL} + NoMount ${NOMOUNT_TAG}"; fi
+          if [ "$ENABLE_BBG" = "true" ]; then KSU_LABEL="${KSU_LABEL} + Baseband-guard"; fi
+          if [ "$ENABLE_REKERNEL" = "true" ]; then KSU_LABEL="${KSU_LABEL} + Re:Kernel"; fi
+          # BLOCK=boot lets ak3-core.sh resolve the partition across /dev/block/by-name,
+          # /dev/block/bootdevice/by-name and platform by-name paths (the last is what Sony devices expose).
+          cat > "$STAGE/anykernel.sh" <<AK3SH
+          ### AnyKernel3 script — Project Aegis ${RELEASE} (poplar_kddi / SOV36)
+          properties() { '
+          kernel.string=Project Aegis ${RELEASE} ${KREL} (${KSU_LABEL}) for poplar_kddi
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=poplar_kddi
+          device.name2=SOV36
+          device.name3=poplar
+          device.name4=Sony KDDI SOV36
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; } # end properties
+
+          ### AnyKernel install
+          BLOCK=boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh;
+
+          # boot install: kernel swap only, ramdisk is repacked untouched
+          dump_boot;
+          write_boot;
+          AK3SH
+          sh -n "$STAGE/anykernel.sh" || { echo "::error::generated anykernel.sh has a syntax error"; exit 1; }
+
+          FEAT=""
+          if [ "$ENABLE_KSUN" != "true" ]; then FEAT="${FEAT}-noksu"; fi
+          if [ "$ENABLE_SUSFS" = "true" ]; then FEAT="${FEAT}-susfs"; fi
+          if [ "$ENABLE_NOMOUNT" = "true" ]; then FEAT="${FEAT}-nomount${NOMOUNT_TAG}"; fi
+          if [ "$ENABLE_BBG" = "true" ]; then FEAT="${FEAT}-bbg"; fi
+          if [ "$ENABLE_REKERNEL" = "true" ]; then FEAT="${FEAT}-rekernel"; fi
+          ZIPNAME="Aegis-${RELEASE}-poplar_kddi${BRAND}${FEAT}-AnyKernel3.zip"
+          ZIP="$DIST/$ZIPNAME"
+          rm -f "$ZIP"
+          ( cd "$STAGE" && zip -r9 -X "$ZIP" . )
+
+          # Verify the ZIP: integrity, required members, and byte-identity of the packed kernel.
+          unzip -tq "$ZIP"
+          LIST="$(unzip -Z1 "$ZIP")"
+          for m in anykernel.sh Image.gz-dtb META-INF/com/google/android/update-binary \
+                   META-INF/com/google/android/updater-script tools/ak3-core.sh; do
+            printf '%s\n' "$LIST" | grep -qxF "$m" || { echo "::error::ZIP lacks $m"; exit 1; }
+          done
+          unzip -p "$ZIP" Image.gz-dtb | cmp - "$B/Image.gz-dtb" || { echo "::error::packed Image.gz-dtb differs from build output"; exit 1; }
+          if printf '%s\n' "$LIST" | grep -qE '(^|/)(Image|dtb)$'; then echo "::error::stray Image/dtb in ZIP"; exit 1; fi
+
+          ( cd "$DIST" && sha256sum "$ZIPNAME" ) | tee "$ART/zip.sha256"
+          # Whole-artifact checksum manifest (kernel files + ZIP)
+          ( cd "$ART" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > "$RUNNER_TEMP/SHA256SUMS" )
+          mv "$RUNNER_TEMP/SHA256SUMS" "$ART/SHA256SUMS"
+          cat "$ART/SHA256SUMS"
+          {
+            echo "ZIP_PATH=$ZIP"
+            echo "ZIP_NAME=$ZIPNAME"
+          } >> "$GITHUB_ENV"
+          unzip -l "$ZIP"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Project Aegis ${RELEASE} — poplar_kddi kernel build"
+            echo "- branch: \`$BRANCH\`  brand: \`${BRAND:-n/a}\`  KSUN: \`$ENABLE_KSUN\`"
+            echo "- build: \`#${KBUILD_BUILD_VERSION:-n/a}\`  \`${KBUILD_BUILD_TIMESTAMP:-n/a}\`"
+            echo "- toolchain: \`${BUILD_TC:-${TC_USED:-n/a}}\` (requested \`${TC_PRIMARY:-$IN_TOOLCHAIN}\`)"
+            echo "- defconfig: \`$DEFCONFIG\`  dtb: \`$DTB_NAME\`"
+            echo "- SUSFS: \`$ENABLE_SUSFS\`  NoMount: \`$ENABLE_NOMOUNT\` (\`$NOMOUNT_TAG\`)  Baseband-guard: \`$ENABLE_BBG\`  Re:Kernel: \`$ENABLE_REKERNEL\`"
+            if [ "$ENABLE_SUSFS" = "true" ]; then
+              echo "- SUSFS caveat: compile/link verified only. spoof_uname, spoof_cmdline, open_redirect, sus_kstat, sus_path and sus_map have NO kernel hook sites in this tree (same as the faryx reference), so those commands are accepted but inert; sus_mount and try_umount are wired."
+            fi
+            if [ "$ENABLE_NOMOUNT" = "true" ]; then
+              echo "- NoMount caveat: upstream maxsteeel/nomount \`$NOMOUNT_TAG\` (\`${NOMOUNT_SHA:0:8}\`, driver protocol v$NOMOUNT_PROTO) with a CI-applied 4.4 compat patch; compile-verified only, not run on a device. Flash/install the matching NoMount $NOMOUNT_TAG metamodule: the v2.0.0 metamodule cannot talk to this driver."
+            fi
+            if [ "$ENABLE_BBG" = "true" ]; then
+              echo "- Baseband-guard caveat: boot/recovery blocking are off (as in the faryx commit), so flashing this zip from Android works. Compile/link verified only; not run on a device."
+            fi
+            if [ "$ENABLE_REKERNEL" = "true" ]; then
+              echo "- Re:Kernel caveat: the driver (netlink server) is built and registered, but this tree has no binder/signal hook sites that call rekernel_report* (same as the faryx reference), so no reports are generated until such hooks are added."
+            fi
+            echo "- final product: \`${ZIP_NAME:-not produced}\` (AnyKernel3; structure-verified, not flash-tested here)"
+            echo "- boot.img: not built (AnyKernel3 repacks the device's own boot image)"
+            if [ -f "$ART/zip.sha256" ]; then echo '```'; cat "$ART/zip.sha256"; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Final product: ONE unzipped file (actions/upload-artifact@v7, archive: false).
+      - name: Upload AnyKernel3 ZIP
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.ZIP_PATH }}
+          archive: false
+          if-no-files-found: error
+
+      # Supporting files (build log, resolved config, Image.gz, Image.gz-dtb, DTB, checksums) as one bundle.
+      - name: Upload build artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-mk1r5-poplar_kddi-run${{ github.run_number }}-build
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
