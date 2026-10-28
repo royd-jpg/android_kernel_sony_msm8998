@@ -141,7 +141,7 @@ on:
           - "Now"
           - "Other"
         default: "Now"
-      custom_build_date:
+      custom_build_date: "Tue Mar 18 03:52:35 CST 2025"
         description: "Custom build timestamp, date(1) style e.g. 'Wed Oct 28 12:00:00 UTC 2026' — only if build_date=Other"
         required: false
         type: string
