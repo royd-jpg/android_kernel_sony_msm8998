@@ -2,6 +2,9 @@ name: Project Aegis Mk1r5 — Build Kernel (Xperia XZ1 SOV36 poplar_kddi + Kerne
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSION HISTORY
+# v.20261106-r5a — Toolchain verification only; toolchain selection, flags, release label (Mk1r5) and artifacts are unchanged. New step
+#   "Verify toolchain resolution" (clang path/version, AArch64+ARM32 compile smoke test, GNU cross tools, llvm-* tools) and a post-build
+#   check that compile.h records clang plus a histogram of tools invoked (artifacts/linux_compiler.txt, tools-invoked.txt).
 # v.20261029-r5 — Mk1r5: NoMount updated v2.0.0 -> v2.2.0 (driver protocol v22). Everything else is unchanged from r4.
 #   Why the source changed: the faryx a9b98d40 NoMount is a 4.4 port of v2.0.0 and the axion-a16-features branch of
 #   royd-jpg/android_kernel_sony_msm8998_v2 has no v2.2.0 port (its tip is still NOMOUNT_VERSION "20", no commit after
@@ -1026,6 +1029,45 @@ jobs:
           fi
           grep -E '^(# )?CONFIG_(KSU|NOMOUNT|BBG|REKERNEL|MACH_SONY_|BUILD_ARM64_APPENDED|LOCALVERSION)' out/.config
 
+      - name: Verify toolchain resolution (compiler, linker, GNU cross tools)
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$ART/toolchain-resolution.txt"
+          : > "$OUT"
+          say() { printf '%s\n' "$*" | tee -a "$OUT"; }
+          say "requested toolchain : $TC_PRIMARY   used: $TC_USED"
+          if [ "$TC_PRIMARY" = "aosp" ] && [ "$TC_USED" != "aosp-${CLANG_REV_INPUT:-$CLANG20_REV}" ]; then
+            echo "::warning::AOSP fallback in use: $TC_USED instead of aosp-${CLANG_REV_INPUT:-$CLANG20_REV}"
+          fi
+          # clang must come from the toolchain installed by this job, not from the runner image (/usr/bin/clang*)
+          CLANG_PATH="$(command -v clang || true)"
+          [ -n "$CLANG_PATH" ] || { echo "::error::clang not found on PATH"; exit 1; }
+          case "$CLANG_PATH" in
+            "$TC/$TC_USED"/*) ;;
+            *) echo "::error::clang resolves to $CLANG_PATH, expected a path under $TC/$TC_USED"; exit 1 ;;
+          esac
+          say "clang               : $CLANG_PATH -> $(readlink -f "$CLANG_PATH")"
+          "$CLANG_PATH" --version | tee -a "$OUT"
+          say "resource dir        : $("$CLANG_PATH" --print-resource-dir)"
+          for tgt in aarch64-linux-gnu arm-linux-gnueabi; do
+            printf 'int f(void){return 0;}\n' | "$CLANG_PATH" --target="$tgt" -x c -c -o "$RUNNER_TEMP/tc-smoke.o" - \
+              || { echo "::error::clang cannot compile for $tgt"; exit 1; }
+            say "smoke compile       : $tgt OK"
+          done
+          rm -f "$RUNNER_TEMP/tc-smoke.o"
+          for t in ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
+            p="$(command -v "$t" || true)"
+            say "$(printf '%-34s : %s' "$t" "${p:-not found (informational)}")"
+          done
+          for t in aarch64-linux-gnu-gcc aarch64-linux-gnu-ld aarch64-linux-gnu-as aarch64-linux-gnu-ar aarch64-linux-gnu-nm \
+                   aarch64-linux-gnu-objcopy aarch64-linux-gnu-objdump aarch64-linux-gnu-strip arm-linux-gnueabi-as; do
+            p="$(command -v "$t" || true)"
+            [ -n "$p" ] || { echo "::error::$t not found (CROSS_COMPILE / CROSS_COMPILE_ARM32 need it)"; exit 1; }
+            say "$(printf '%-34s : %s' "$t" "$p")"
+          done
+          say "HOSTCC              : $(command -v gcc)  ($(gcc --version | sed -n '1p'))"
+
       - name: Build poplar_kddi DTB and Image.gz-dtb (poplar_kddi DTB only)
         shell: bash
         run: |
@@ -1108,6 +1150,19 @@ jobs:
           grep -qF -- "#$KBUILD_BUILD_VERSION " "$ART/linux_version.txt" || { echo "::error::version string lacks '#$KBUILD_BUILD_VERSION'"; exit 1; }
           grep -qF -- "$KBUILD_BUILD_TIMESTAMP" "$ART/linux_version.txt" || { echo "::error::version string lacks timestamp '$KBUILD_BUILD_TIMESTAMP'"; exit 1; }
           if grep -q 'JustinLin099' "$ART/linux_version.txt"; then echo "::error::JustinLin099 in vmlinux version string"; exit 1; fi
+
+          # Toolchain actually used: compile.h records the compiler; every .cmd file records the tool the build invoked.
+          CC_LINE="$(grep -m1 'LINUX_COMPILER' out/include/generated/compile.h 2>/dev/null || true)"
+          if [ -z "$CC_LINE" ]; then
+            echo "::warning::LINUX_COMPILER not found in out/include/generated/compile.h (compiler cannot be confirmed from it)"
+          else
+            echo "$CC_LINE" | tee "$ART/linux_compiler.txt"
+            case "$CC_LINE" in *[Cc]lang*) ;; *) echo "::error::kernel was not built with clang: $CC_LINE"; exit 1 ;; esac
+          fi
+          {
+            echo "tools invoked by the build (first word of each cmd_ line; host tools in scripts/ excluded; count tool):"
+            find out -name '.*.cmd' -not -path 'out/scripts/*' -exec awk 'FNR==1 && $2==":=" {print $3}' {} + | sort | uniq -c | sort -rn | sed -n '1,25p'
+          } | tee "$ART/tools-invoked.txt"
 
           if [ "$ENABLE_KSUN" = "true" ]; then
             grep -qE ' [Tt] ksu_' out/System.map || { echo "::error::no ksu_* symbols linked into vmlinux"; exit 1; }
