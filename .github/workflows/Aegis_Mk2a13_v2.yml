@@ -33,10 +33,10 @@ on:
         required: true
         type: choice
         options:
-          - "-Aegis_Mk2a13"
+          - "-AEGIS_MK2_REV0"
           - "-am1x[git7]"
           - "Other"
-        default: "-am1x[git7]"
+        default: "-AEGIS_MK2_REV0"
       custom_brand:
         description: "Custom brand — only if brand=Other (must start with '-')"
         required: false
@@ -44,12 +44,12 @@ on:
       build_user:
         description: "KBUILD_BUILD_USER"
         required: false
-        default: "am1x"
+        default: "T,X,RC"
         type: string
       build_host:
         description: "KBUILD_BUILD_HOST"
         required: false
-        default: "AegisDevLabs"
+        default: "A2XXA13"
         type: string
       build_version:
         description: "KBUILD_BUILD_VERSION (digits)"
@@ -65,7 +65,7 @@ on:
           - "Other"
         default: "Now"
       custom_build_date:
-        description: "Custom build timestamp e.g. 'Wed Oct 28 12:00:00 UTC 2026'"
+        description: "Custom build timestamp e.g. 'Fri Nov 10 01:33:33 CET 2023'"
         required: false
         type: string
       ak3_sha:
@@ -174,8 +174,8 @@ jobs:
           set -euo pipefail
           cd "$KDIR"
           if [ "$ENABLE_KSUN" = "true" ]; then
-            git clone --depth=1 "$KSUN_REPO" KernelSU-Next
-            git -C KernelSU-Next fetch origin "$KSUN_SHA" && git -C KernelSU-Next checkout "$KSUN_SHA"
+            git clone --depth=1 "$KSUN_REPO" drivers/kernelsu
+            git -C drivers/kernelsu fetch origin "$KSUN_SHA" && git -C drivers/kernelsu checkout "$KSUN_SHA"
           fi
           if [ "$ENABLE_BBG" = "true" ] || [ "$ENABLE_SUSFS" = "true" ]; then
             git clone --depth=1 "$FARYX_REPO" "$RUNNER_TEMP/faryx"
