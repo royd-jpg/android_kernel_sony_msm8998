@@ -1,39 +1,30 @@
 name: Project Aegis Mk2a13 — Build Kernel (Xperia XZ1 SOV36 poplar_kddi / whatawurst lineage-20 4.4.302 + KernelSU-Next / SUSFS / NoMount v2.2.0 / Baseband-guard) → AnyKernel3 ZIP
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Project Aegis Mk2a13 — Complete reproducible GitHub Actions workflow.
-# Target : Sony Xperia XZ1 SOV36 (poplar_kddi), msm8998, Linux 4.4.302, arm64, non-GKI
-# Config : arch/arm64/configs/lineage-msm8998-yoshino-poplar_kddi_defconfig
-# DTB    : arch/arm/boot/dts/qcom/msm8998-v2.1-yoshino-poplar_kddi.dtb
-# Image  : CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y -> Image.gz-dtb = Image.gz + single DTB
-# Root   : KernelSU-Next (manual hook mode), SUSFS v2.3.0, NoMount v2.2.0, Baseband-guard.
-# ─────────────────────────────────────────────────────────────────────────────
-
 on:
   workflow_dispatch:
     inputs:
       kernel_sha:
-        description: "Immutable commit of whatawurst/android_kernel_sony_msm8998 to build (40 hex). Default = lineage-20 tip 3c398ab4."
+        description: "Immutable commit of whatawurst/android_kernel_sony_msm8998 to build (40 hex)."
         required: true
         default: "3c398ab488c7f80082e36c26725eb69814e57872"
         type: string
       enable_ksun:
-        description: "KernelSU-Next (CONFIG_KSU=y, CONFIG_KSU_MANUAL_HOOK=y). false = no KSU code at all"
+        description: "KernelSU-Next (CONFIG_KSU=y, CONFIG_KSU_MANUAL_HOOK=y)."
         required: true
         default: true
         type: boolean
       enable_susfs:
-        description: "SUSFS v2.3.0 (kernel side + KernelSU-Next hooks). Requires enable_ksun=true"
+        description: "SUSFS v2.3.0. Requires enable_ksun=true"
         required: true
         default: true
         type: boolean
       enable_nomount:
-        description: "NoMount v2.2.0 (+ 4.4 compat script). Independent of KSU"
+        description: "NoMount v2.2.0 (+ 4.4 compat script)."
         required: true
         default: true
         type: boolean
       enable_bbg:
-        description: "Baseband-guard (CONFIG_BBG=y, boot/recovery blocking off). Independent"
+        description: "Baseband-guard (CONFIG_BBG=y)."
         required: true
         default: true
         type: boolean
@@ -111,16 +102,11 @@ jobs:
       ENABLE_BBG: ${{ inputs.enable_bbg }}
       KSUN_REPO: https://github.com/justinlin099/KernelSU-Next.git
       KSUN_SHA: bac3e281b7062ee79448866d48d78eda60c0ba99
-      KSUN_SUSFS_SHA: 4cc162e027cc36f8e4d4e6a554e9aa07cac4d4f0
       FARYX_REPO: https://github.com/faryx/android_kernel_sony_msm8998.git
-      FARYX_SHA: a9b98d40658ebcf97522a517b806b71b3415a150
       NOMOUNT_REPO: https://github.com/maxsteeel/nomount.git
       NOMOUNT_TAG: v2.2.0
-      NOMOUNT_SHA: bf1847f98fed382369c43bfd652cd93774b9b8e3
       CLANG_REV: r450784e
-      CLANG_VERSION_EXPECT: 14.0.7
       CLANG_REPO: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
-      CLANG_PREBUILTS_SHA: 5538393cf30cb39da6d53730a9b85f36958230da
       IN_BRAND: ${{ inputs.brand }}
       IN_CUSTOM_BRAND: ${{ inputs.custom_brand }}
       IN_BUILD_USER: ${{ inputs.build_user }}
@@ -175,7 +161,7 @@ jobs:
             FINAL_DATE="${IN_CUSTOM_BUILD_DATE:-$BUILD_DATE_DEFAULT}"
           else
             FINAL_DATE="$(date -u '+%a %b %-d %H:%M:%S UTC %Y')"
-          fi
+          end
           {
             echo "KBUILD_BUILD_VERSION=$IN_BUILD_VERSION"
             echo "KBUILD_BUILD_TIMESTAMP=$FINAL_DATE"
@@ -191,7 +177,6 @@ jobs:
           cd "$KDIR"
           if [ "$ENABLE_KSUN" = "true" ]; then
             git clone --depth=1 --branch master "$KSUN_REPO" KernelSU-Next
-            # Checkout specific pinned commit if desired
             git -C KernelSU-Next fetch origin "$KSUN_SHA" && git -C KernelSU-Next checkout "$KSUN_SHA"
           fi
           if [ "$ENABLE_BBG" = "true" ] || [ "$ENABLE_SUSFS" = "true" ]; then
@@ -201,26 +186,24 @@ jobs:
             git clone --depth=1 --branch "$NOMOUNT_TAG" "$NOMOUNT_REPO" fs/nomount
           fi
 
-      - name: Apply Kernel Hooks & Drivers via Python
-        shell: python3
+      - name: Apply Kernel Hooks & Drivers via Python Script
+        shell: bash
         run: |
+          python3 - << 'EOF'
           import os
           kdir = os.environ["KDIR"]
           enable_ksun = os.environ["ENABLE_KSUN"] == "true"
-          enable_susfs = os.environ["ENABLE_SUSFS"] == "true"
-          enable_bbg = os.environ["ENABLE_BBG"] == "true"
           
-          print(f"Applying integrations: ksun={enable_ksun}, susfs={enable_susfs}, bbg={enable_bbg}")
+          print(f"Applying integrations: ksun={enable_ksun}")
           
-          # 1. KernelSU-Next Kconfig & Makefile integration
           if enable_ksun:
               kconfig_path = os.path.join(kdir, "drivers", "Kconfig")
               with open(kconfig_path, "r") as f:
                   content = f.read()
               if "kernelsu/Kconfig" not in content:
-                  content = content.replace('source "drivers/tee/Kconfig"', 'source "drivers/tee/Kconfig"\nsource "drivers/kernelsu/Kconfig"')
-                  with open(kconfig_path, "w") as f:
-                      f.write(content)
+                content = content.replace('source "drivers/tee/Kconfig"', 'source "drivers/tee/Kconfig"\nsource "drivers/kernelsu/Kconfig"')
+                with open(kconfig_path, "w") as f:
+                    f.write(content)
 
               makefile_path = os.path.join(kdir, "drivers", "Makefile")
               with open(makefile_path, "r") as f:
@@ -230,17 +213,11 @@ jobs:
                   with open(makefile_path, "w") as f:
                       f.write(content)
 
-              # fs/exec.c hook
               exec_path = os.path.join(kdir, "fs", "exec.c")
               with open(exec_path, "r") as f:
                   exec_content = f.read()
               if "ksu_handle_execveat" not in exec_content:
-                  hook_code = """
-#ifdef CONFIG_KSU
-__attribute__((hot))
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *args, void *envp, int *flags);
-#endif
-"""
+                  hook_code = "\n#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *args, void *envp, int *flags);\n#endif\n"
                   exec_content = hook_code + exec_content
                   exec_content = exec_content.replace(
                       'int do_execve(',
@@ -248,8 +225,8 @@ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *ar
                   )
                   with open(exec_path, "w") as f:
                       f.write(exec_content)
-
           print("Hooks applied successfully.")
+          EOF
 
       - name: Setup Toolchain (AOSP Clang 14.0.7)
         shell: bash
@@ -270,23 +247,14 @@ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *ar
           
           make O=out "$DEFCONFIG"
           
-          # Enable options via scripts/config
           if [ "$ENABLE_KSUN" = "true" ]; then
             scripts/config --file out/.config --enable CONFIG_KSU
             scripts/config --file out/.config --enable CONFIG_KSU_MANUAL_HOOK
           fi
           if [ "$ENABLE_SUSFS" = "true" ]; then
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_PATH
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_ENABLE_LOG
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT
-            scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_MAP
+            for opt in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_TRY_UMOUNT CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP; do
+              scripts/config --file out/.config --enable "$opt"
+            done
           fi
           if [ "$ENABLE_BBG" = "true" ]; then
             scripts/config --file out/.config --enable CONFIG_BBG
@@ -322,9 +290,7 @@ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *ar
           cd "$RUNNER_TEMP"
           git clone --depth=1 --branch master "$AK3_REPO" AnyKernel3
           rm -rf AnyKernel3/.git AnyKernel3/README.md
-          
           cp "$KDIR/out/arch/arm64/boot/Image.gz-dtb" AnyKernel3/
-          
           cd AnyKernel3
           zip -r9 "$DIST/Aegis-Mk2a13-poplar_kddi.zip" *
           echo "Package created at $DIST/Aegis-Mk2a13-poplar_kddi.zip"
