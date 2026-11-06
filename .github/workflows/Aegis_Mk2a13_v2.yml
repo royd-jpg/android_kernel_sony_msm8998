@@ -176,7 +176,7 @@ jobs:
           set -euo pipefail
           cd "$KDIR"
           if [ "$ENABLE_KSUN" = "true" ]; then
-            git clone --depth=1 --branch master "$KSUN_REPO" KernelSU-Next
+            git clone --depth=1 "$KSUN_REPO" KernelSU-Next
             git -C KernelSU-Next fetch origin "$KSUN_SHA" && git -C KernelSU-Next checkout "$KSUN_SHA"
           fi
           if [ "$ENABLE_BBG" = "true" ] || [ "$ENABLE_SUSFS" = "true" ]; then
