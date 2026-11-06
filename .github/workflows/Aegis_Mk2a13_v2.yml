@@ -105,8 +105,6 @@ jobs:
       FARYX_REPO: https://github.com/faryx/android_kernel_sony_msm8998.git
       NOMOUNT_REPO: https://github.com/maxsteeel/nomount.git
       NOMOUNT_TAG: v2.2.0
-      CLANG_REV: r450784e
-      CLANG_REPO: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
       IN_BRAND: ${{ inputs.brand }}
       IN_CUSTOM_BRAND: ${{ inputs.custom_brand }}
       IN_BUILD_USER: ${{ inputs.build_user }}
@@ -228,12 +226,12 @@ jobs:
           print("Hooks applied successfully.")
           EOF
 
-      - name: Setup Toolchain (AOSP Clang 14.0.7)
+      - name: Setup Toolchain (AOSP Clang 14 standalone)
         shell: bash
         run: |
           set -euo pipefail
           cd "$TC"
-          git clone --depth=1 --branch "$CLANG_REV" "$CLANG_REPO/clang-${CLANG_REV}" clang
+          git clone --depth=1 --branch 14 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone clang
           echo "$TC/clang/bin" >> $GITHUB_PATH
 
       - name: Configure Kernel Defconfig
