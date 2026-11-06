@@ -161,7 +161,7 @@ jobs:
             FINAL_DATE="${IN_CUSTOM_BUILD_DATE:-$BUILD_DATE_DEFAULT}"
           else
             FINAL_DATE="$(date -u '+%a %b %-d %H:%M:%S UTC %Y')"
-          end
+          fi
           {
             echo "KBUILD_BUILD_VERSION=$IN_BUILD_VERSION"
             echo "KBUILD_BUILD_TIMESTAMP=$FINAL_DATE"
