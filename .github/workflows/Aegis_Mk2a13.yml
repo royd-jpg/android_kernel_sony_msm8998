@@ -1156,7 +1156,8 @@ jobs:
           MAKE_ARGS=(O=out ARCH=arm64 SUBARCH=arm64
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
             CC=clang LLVM=1 CLANG_TRIPLE=aarch64-linux-gnu-
-            HOSTCC="gcc -fcommon" HOSTCXX=g++)
+            HOSTCC="gcc -fcommon" HOSTCXX=g++
+            LOCALVERSION=)   # set-but-empty: stops scripts/setlocalversion appending "+" on an untagged git tree; the brand comes from CONFIG_LOCALVERSION
           EOF
           # shellcheck disable=SC1091
           source "$RUNNER_TEMP/make-args.sh"
