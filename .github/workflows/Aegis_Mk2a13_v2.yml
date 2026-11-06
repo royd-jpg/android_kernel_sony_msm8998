@@ -1,4 +1,4 @@
-name: Project Aegis Mk2a13 — Build Kernel (Xperia XZ1 SOV36 poplar_kddi / whatawurst lineage-20 4.4.302 + KernelSU-Next / SUSFS / NoMount v2.2.0 / Baseband-guard) → AnyKernel3 ZIP
+name: Project Aegis Mk2a13 — Build Kernel (Xperia XZ1 SOV36 poplar_kddi / whatawurst lineage-20 4.4.302 + KernelSU-Next / SUSFS v2.3.0 / NoMount v2.2.0 / Baseband-guard) → AnyKernel3 ZIP
 
 on:
   workflow_dispatch:
@@ -173,7 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$KDIR"
-          rm -rf drivers/kernelsu fs/nomount "$RUNNER_TEMP/ksun_temp" "$RUNNER_TEMP/faryx"
+          rm -rf drivers/kernelsu fs/nomount "$RUNNER_TEMP/ksun_temp" "$RUNNER_TEMP/nomount_temp" "$RUNNER_TEMP/faryx"
           
           if [ "$ENABLE_KSUN" = "true" ]; then
             git clone --depth=1 "$KSUN_REPO" "$RUNNER_TEMP/ksun_temp"
@@ -193,8 +193,10 @@ jobs:
           fi
           
           if [ "$ENABLE_NOMOUNT" = "true" ]; then
-            git clone --depth=1 --branch "$NOMOUNT_TAG" "$NOMOUNT_REPO" fs/nomount
-            [ -f fs/nomount/Kconfig ] || { echo "::error::fs/nomount/Kconfig missing after clone"; exit 1; }
+            git clone --depth=1 --branch "$NOMOUNT_TAG" "$NOMOUNT_REPO" "$RUNNER_TEMP/nomount_temp"
+            mkdir -p fs/nomount
+            cp -r "$RUNNER_TEMP/nomount_temp/kernel/." fs/nomount/
+            [ -f fs/nomount/Kconfig ] || { echo "::error::fs/nomount/Kconfig missing after setup"; exit 1; }
           fi
 
       - name: Apply Kernel Hooks & Drivers via Python Script
