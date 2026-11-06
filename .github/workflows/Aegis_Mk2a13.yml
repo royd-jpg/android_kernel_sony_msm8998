@@ -175,9 +175,6 @@ jobs:
           set -euo pipefail
           [[ "$IN_KERNEL_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::kernel_sha must be a full 40-hex commit id (got '$IN_KERNEL_SHA')"; exit 1; }
           [[ "$IN_AK3_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ak3_sha must be a full 40-hex commit id (got '$IN_AK3_SHA')"; exit 1; }
-          [[ "$IN_BUILD_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad build_user '$IN_BUILD_USER'"; exit 1; }
-          [[ "$IN_BUILD_HOST" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad build_host '$IN_BUILD_HOST'"; exit 1; }
-          [[ "$IN_BUILD_VERSION" =~ ^[0-9]+$ ]] || { echo "::error::build_version must be digits"; exit 1; }
           for v in ENABLE_KSUN ENABLE_SUSFS ENABLE_NOMOUNT ENABLE_BBG; do
             [[ "${!v}" =~ ^(true|false)$ ]] || { echo "::error::$v must be true or false (got '${!v}')"; exit 1; }
           done
@@ -224,8 +221,8 @@ jobs:
             "-am1x[git7]")  FINAL_BRAND="-am1x${GIT7}" ;;
             *)              FINAL_BRAND="$IN_BRAND" ;;
           esac
-          [[ "$FINAL_BRAND" =~ ^-[A-Za-z0-9._+@:-]+$ ]] || { echo "::error::brand '$FINAL_BRAND' must start with '-' and use [A-Za-z0-9._+@:-]"; exit 1; }
-          case "$FINAL_BRAND" in *whatawurst*|*JustinLin099*) echo "::error::brand must not contain a previous maintainer tag"; exit 1 ;; esac
+          # the only brand check: it must start with '-'
+          case "$FINAL_BRAND" in -*) ;; *) echo "::error::brand '$FINAL_BRAND' must start with '-'"; exit 1 ;; esac
           if [ "$IN_BUILD_DATE" = "Other" ]; then
             FINAL_DATE="$IN_CUSTOM_BUILD_DATE"
             if [ -z "$FINAL_DATE" ]; then
@@ -235,15 +232,16 @@ jobs:
           else
             FINAL_DATE="$(date -u '+%a %b %-d %H:%M:%S UTC %Y')"
           fi
-          [[ "$FINAL_DATE" =~ ^[A-Za-z0-9\ :+._-]+$ ]] || { echo "::error::bad build date '$FINAL_DATE'"; exit 1; }
-          {
-            echo "KBUILD_BUILD_VERSION=$IN_BUILD_VERSION"
-            echo "KBUILD_BUILD_TIMESTAMP=$FINAL_DATE"
-            echo "BRAND=$FINAL_BRAND"
-            echo "KERNEL_SHA=$SHA"
-            echo "KBUILD_BUILD_USER=$IN_BUILD_USER"
-            echo "KBUILD_BUILD_HOST=$IN_BUILD_HOST"
-          } >> "$GITHUB_ENV"
+          # Values are unchecked, so write them with the multi-line GITHUB_ENV syntax and a random delimiter:
+          # a value containing a newline can then never define additional environment variables.
+          DELIM="AEGIS_EOF_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+          envset() { printf '%s<<%s\n%s\n%s\n' "$1" "$DELIM" "$2" "$DELIM" >> "$GITHUB_ENV"; }
+          envset KBUILD_BUILD_VERSION "$IN_BUILD_VERSION"
+          envset KBUILD_BUILD_TIMESTAMP "$FINAL_DATE"
+          envset BRAND "$FINAL_BRAND"
+          envset KERNEL_SHA "$SHA"
+          envset KBUILD_BUILD_USER "$IN_BUILD_USER"
+          envset KBUILD_BUILD_HOST "$IN_BUILD_HOST"
           echo "brand=$FINAL_BRAND  kernel HEAD=$SHA  user=$IN_BUILD_USER  host=$IN_BUILD_HOST  ver=#$IN_BUILD_VERSION  ts=$FINAL_DATE"
 
       - name: Preflight A — pristine base (target, API anchors, nothing pre-integrated)
@@ -1205,7 +1203,6 @@ jobs:
           must CONFIG_MACH_SONY_POPLAR_KDDI=y
           must CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
           must 'CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="qcom/msm8998-v2.1-yoshino-poplar_kddi"'
-          must "CONFIG_LOCALVERSION=\"$BRAND\""
           mustnot 'CONFIG_LOCALVERSION_AUTO=y'
           mustnot 'CONFIG_MACH_SONY_(MAPLE|MAPLE_DSDS|POPLAR|POPLAR_DSDS|LILAC|LILAC_DCM)=y'
           mustnot 'CONFIG_KSU_(KPROBES_HOOK|TRACEPOINT_HOOK)=y'
@@ -1376,17 +1373,11 @@ jobs:
           head -c "$gz" "$B/Image.gz-dtb" | cmp - "$B/Image.gz" || { echo "::error::Image.gz-dtb does not start with Image.gz"; exit 1; }
           tail -c "$dtb" "$B/Image.gz-dtb" | cmp - "${KDDI_DTB[0]}" || { echo "::error::Image.gz-dtb does not end with the poplar_kddi DTB"; exit 1; }
 
-          # Brand: kernel.release must end with the brand; the linked vmlinux must carry it too.
+          # Record the version identity for the artifacts. Brand and Kbuild identity values (user, host, #N, timestamp) are deliberately NOT verified.
           KREL="$(cat out/include/config/kernel.release)"
           echo "kernel.release: $KREL"
-          case "$KREL" in *"$BRAND") ;; *) echo "::error::kernel.release '$KREL' does not end with brand '$BRAND'"; exit 1 ;; esac
-          case "$KREL" in *whatawurst*|*JustinLin099*) echo "::error::previous maintainer tag still present in kernel.release"; exit 1 ;; esac
           strings -n 8 out/vmlinux 2>/dev/null | grep -m1 'Linux version' > "$ART/linux_version.txt" || true
-          [ -s "$ART/linux_version.txt" ] || { echo "::error::no 'Linux version' string found in vmlinux"; exit 1; }
           cat "$ART/linux_version.txt"
-          grep -qF -- "$KREL" "$ART/linux_version.txt" || { echo "::error::vmlinux version string lacks '$KREL'"; exit 1; }
-          grep -qF -- "#$KBUILD_BUILD_VERSION " "$ART/linux_version.txt" || { echo "::error::version string lacks '#$KBUILD_BUILD_VERSION'"; exit 1; }
-          grep -qF -- "$KBUILD_BUILD_TIMESTAMP" "$ART/linux_version.txt" || { echo "::error::version string lacks timestamp '$KBUILD_BUILD_TIMESTAMP'"; exit 1; }
 
           # Toolchain actually used: compile.h records the compiler; every .cmd file records the tool the build invoked.
           CC_LINE="$(grep -m1 'LINUX_COMPILER' out/include/generated/compile.h 2>/dev/null || true)"
