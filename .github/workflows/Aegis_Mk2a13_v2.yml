@@ -74,7 +74,6 @@ on:
         default: "41f04bdb4ee30a44e429c2c1131d5e8bb32b15f1"
         type: string
 
-
 permissions:
   contents: read
 
@@ -174,15 +173,25 @@ jobs:
         run: |
           set -euo pipefail
           cd "$KDIR"
-          rm -rf drivers/kernelsu fs/nomount "$RUNNER_TEMP/faryx"
+          rm -rf drivers/kernelsu fs/nomount "$RUNNER_TEMP/ksun_temp" "$RUNNER_TEMP/faryx"
+          
           if [ "$ENABLE_KSUN" = "true" ]; then
-            git clone --depth=1 "$KSUN_REPO" drivers/kernelsu
-            git -C drivers/kernelsu fetch origin "$KSUN_SHA" && git -C drivers/kernelsu checkout "$KSUN_SHA"
-            [ -f drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu/Kconfig missing after clone"; exit 1; }
+            git clone --depth=1 "$KSUN_REPO" "$RUNNER_TEMP/ksun_temp"
+            git -C "$RUNNER_TEMP/ksun_temp" fetch origin "$KSUN_SHA" && git -C "$RUNNER_TEMP/ksun_temp" checkout "$KSUN_SHA"
+            mkdir -p drivers/kernelsu
+            cp -r "$RUNNER_TEMP/ksun_temp/kernel/." drivers/kernelsu/
+            [ -f drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu/Kconfig missing after setup"; exit 1; }
           fi
+          
           if [ "$ENABLE_BBG" = "true" ] || [ "$ENABLE_SUSFS" = "true" ]; then
             git clone --depth=1 "$FARYX_REPO" "$RUNNER_TEMP/faryx"
+            if [ "$ENABLE_SUSFS" = "true" ] && [ -d "$RUNNER_TEMP/faryx/fs" ]; then
+              cp -f "$RUNNER_TEMP/faryx/fs/susfs.c" fs/ 2>/dev/null || true
+              cp -f "$RUNNER_TEMP/faryx/include/linux/susfs.h" include/linux/ 2>/dev/null || true
+              cp -f "$RUNNER_TEMP/faryx/include/uapi/linux/susfs.h" include/uapi/linux/ 2>/dev/null || true
+            fi
           fi
+          
           if [ "$ENABLE_NOMOUNT" = "true" ]; then
             git clone --depth=1 --branch "$NOMOUNT_TAG" "$NOMOUNT_REPO" fs/nomount
             [ -f fs/nomount/Kconfig ] || { echo "::error::fs/nomount/Kconfig missing after clone"; exit 1; }
@@ -302,4 +311,3 @@ jobs:
         with:
           name: Aegis-Mk2a13-poplar_kddi-AnyKernel3
           path: ${{ env.DIST }}/Aegis-Mk2a13-poplar_kddi.zip
-
